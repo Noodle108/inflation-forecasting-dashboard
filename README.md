@@ -27,6 +27,7 @@ apples-to-apples, run on current data, and explored online.
 | Structural | New Keynesian Phillips curve | Galí–Gertler (1999) | ✅ working |
 | Structural | Small-scale DSGE (estimated) | Smets–Wouters (2007) tradition | ✅ working |
 | Structural | Full Smets–Wouters DSGE (7-shock) | Smets–Wouters (2007) | ✅ working |
+| Structural | Bernanke–Blanchard wage–price | Bernanke–Blanchard (2023) | ✅ working |
 
 ## Quick start
 

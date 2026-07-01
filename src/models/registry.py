@@ -11,6 +11,7 @@ from typing import Callable, Dict
 from .ar import ARModel
 from .base import ForecastModel
 from .benchmarks import AtkesonOhanian, RandomWalk
+from .bernanke_blanchard import BernankeBlanchard
 from .bvar import BVAR, BVARHierarchical
 from .dsge import NewKeynesianPC, SmallScaleDSGE
 from .phillips import PhillipsCurve
@@ -30,6 +31,7 @@ MODELS: Dict[str, Callable[[], ForecastModel]] = {
     "nkpc": NewKeynesianPC,
     "dsge": SmallScaleDSGE,
     "sw07": SmetsWouters2007,
+    "bb": BernankeBlanchard,
 }
 
 # Default benchmark all skill scores are computed against.
