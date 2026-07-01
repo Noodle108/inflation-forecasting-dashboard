@@ -6,3 +6,6 @@ __pycache__/
 .cache/
 data_cache/
 .DS_Store
+
+# Claude Code local settings
+.claude/
