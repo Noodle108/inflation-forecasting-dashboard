@@ -24,7 +24,9 @@ apples-to-apples, run on current data, and explored online.
 | Statistical | UCSV-SV (stochastic volatility, MCMC) | Stock–Watson (2007) | ✅ working |
 | Statistical | BVAR (Minnesota prior, fixed λ) | Litterman (1986); Bańbura et al. (2010) | ✅ working |
 | Statistical | BVAR (hierarchical, ML shrinkage) | Giannone–Lenza–Primiceri (2015) | ✅ working |
+| Statistical | TVP-VAR with stochastic volatility | Primiceri (2005) | ✅ working |
 | Structural | New Keynesian Phillips curve | Galí–Gertler (1999) | ✅ working |
+| Structural | Phillips curve, time-varying trend | Cogley–Sbordone (2008) | ✅ working |
 | Structural | Small-scale DSGE (estimated) | Smets–Wouters (2007) tradition | ✅ working |
 | Structural | Full Smets–Wouters DSGE (7-shock) | Smets–Wouters (2007) | ✅ working |
 | Structural | Bernanke–Blanchard wage–price | Bernanke–Blanchard (2023) | ✅ working |

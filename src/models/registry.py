@@ -16,6 +16,8 @@ from .bvar import BVAR, BVARHierarchical
 from .dsge import NewKeynesianPC, SmallScaleDSGE
 from .phillips import PhillipsCurve
 from .sw2007 import SmetsWouters2007
+from .tvt_nkpc import TVTNKPC
+from .tvp_var import TVPVARSV
 from .ucsv import UCSV, UCSVSV
 
 # key -> zero-arg factory returning a fresh, unfit model instance
@@ -28,7 +30,9 @@ MODELS: Dict[str, Callable[[], ForecastModel]] = {
     "ucsvsv": UCSVSV,
     "bvar": BVAR,
     "bvarh": BVARHierarchical,
+    "tvpvar": TVPVARSV,
     "nkpc": NewKeynesianPC,
+    "tvtnkpc": TVTNKPC,
     "dsge": SmallScaleDSGE,
     "sw07": SmetsWouters2007,
     "bb": BernankeBlanchard,
