@@ -13,9 +13,13 @@ from .base import ForecastModel
 from .benchmarks import AtkesonOhanian, RandomWalk
 from .bernanke_blanchard import BernankeBlanchard
 from .bvar import BVAR, BVARHierarchical
+from .cleveland_expectations import ClevelandExpectations
+from .cleveland_nowcast import ClevelandNowcast
 from .dsge import NewKeynesianPC, SmallScaleDSGE
+from .nyfed_dsge import NYFedDSGE
 from .phillips import PhillipsCurve
 from .sw2007 import SmetsWouters2007
+from .sw_dfm import StockWatsonDFM
 from .tvt_nkpc import TVTNKPC
 from .tvp_var import TVPVARSV
 from .ucsv import UCSV, UCSVSV
@@ -33,9 +37,13 @@ MODELS: Dict[str, Callable[[], ForecastModel]] = {
     "tvpvar": TVPVARSV,
     "nkpc": NewKeynesianPC,
     "tvtnkpc": TVTNKPC,
+    "swdfm": StockWatsonDFM,
+    "clenow": ClevelandNowcast,
     "dsge": SmallScaleDSGE,
     "sw07": SmetsWouters2007,
     "bb": BernankeBlanchard,
+    "nyfed": NYFedDSGE,
+    "cleexp": ClevelandExpectations,
 }
 
 # Default benchmark all skill scores are computed against.

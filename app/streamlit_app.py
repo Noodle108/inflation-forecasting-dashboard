@@ -100,7 +100,7 @@ chosen = st.sidebar.multiselect(
 
 horizon = st.sidebar.slider("Forecast horizon (periods ahead)", 1, 24, 12 if freq == "M" else 4)
 lookback = st.sidebar.slider("History shown (years)", 1, 25, 5)
-st.sidebar.caption("Slower models (UCSV-SV, DSGE) run an estimation step and take a few seconds.")
+st.sidebar.caption("Slower models (UCSV-SV, DSGE, NY Fed DSGE, SW-DFM) run an estimation step and take a few seconds.")
 
 # --------------------------------------------------------------------------- #
 # Header
