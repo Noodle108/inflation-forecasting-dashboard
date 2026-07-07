@@ -22,11 +22,23 @@ class BacktestResult:
     horizon: int
     scheme: str
     forecasts: pd.DataFrame          # index=origin date, columns=model keys
-    realized: pd.Series              # realized value at origin+h, indexed by origin
+    realized: pd.Series              # realized value at target date, indexed by origin
     metrics: pd.DataFrame            # rows=model, cols=[rmse, mae, rel_rmse, n]
+    target_dates: pd.DatetimeIndex = None  # target date of each forecast (= origin + h)
 
     def leaderboard(self) -> pd.DataFrame:
         return self.metrics.sort_values("rel_rmse")
+
+    def by_target(self) -> tuple[pd.DataFrame, pd.Series]:
+        """Return (forecasts, realized) re-indexed by the target date so a chart of
+        both series shows the forecast and the realized value at the same point in time.
+        """
+        idx = self.target_dates if self.target_dates is not None else self.forecasts.index
+        fc = self.forecasts.copy()
+        fc.index = idx
+        r = self.realized.copy()
+        r.index = idx
+        return fc, r
 
 
 def _fit_and_forecast(key, y_train, X_train, h) -> Optional[float]:
@@ -57,7 +69,7 @@ def run_backtest(
 
     origins = list(range(min_train, n - horizon, step))
     fc = {k: [] for k in model_keys}
-    realized, origin_dates = [], []
+    realized, origin_dates, target_dates = [], [], []
 
     total = len(origins)
     for i, t in enumerate(origins):
@@ -73,17 +85,21 @@ def run_backtest(
         for k in model_keys:
             fc[k].append(_fit_and_forecast(k, y_train, X_train, horizon))
 
-        realized.append(float(y.iloc[t + horizon - 1]))
+        target_i = t + horizon - 1
+        realized.append(float(y.iloc[target_i]))
         origin_dates.append(idx[t])
+        target_dates.append(idx[target_i])
 
         if progress is not None and total:
             progress((i + 1) / total)
 
     forecasts = pd.DataFrame(fc, index=pd.Index(origin_dates, name="origin"))
     realized_s = pd.Series(realized, index=forecasts.index, name="realized")
+    targets = pd.DatetimeIndex(target_dates, name="target")
 
     metrics = _score(forecasts, realized_s, benchmark_key)
-    return BacktestResult(horizon, scheme, forecasts, realized_s, metrics)
+    return BacktestResult(horizon, scheme, forecasts, realized_s, metrics,
+                          target_dates=targets)
 
 
 def _score(forecasts: pd.DataFrame, realized: pd.Series, benchmark_key: str) -> pd.DataFrame:

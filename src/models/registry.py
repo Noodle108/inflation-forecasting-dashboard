@@ -50,6 +50,11 @@ MODELS: Dict[str, Callable[[], ForecastModel]] = {
 BENCHMARK_KEY = "rw"
 
 
+# Merge per-model data-source / assumptions / equations metadata (see model_extras.py).
+from .model_extras import apply_extras as _apply_extras
+_apply_extras(MODELS)
+
+
 def make(key: str) -> ForecastModel:
     if key not in MODELS:
         raise KeyError(f"Unknown model '{key}'. Available: {list(MODELS)}")

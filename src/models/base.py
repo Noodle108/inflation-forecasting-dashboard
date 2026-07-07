@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -36,6 +36,10 @@ class ModelInfo:
     strengths: str = ""     # when/why it tends to do well
     caveats: str = ""       # known weaknesses / what to watch for
     forecast_shape: str = ""  # what its forecast *path* looks like and why
+    # --- data + methodology, shown in Model Library and expander cards ---
+    data_sources: List[Tuple[str, str]] = field(default_factory=list)  # [(label, url)]
+    assumptions: str = ""       # key modeling assumptions (Fisher, real wages, RE, ...)
+    equations: str = ""         # a compact math sketch of what the model actually is
 
 
 class ForecastModel(ABC):

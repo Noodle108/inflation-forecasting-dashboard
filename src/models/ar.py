@@ -46,11 +46,14 @@ class ARModel(ForecastModel):
             if self.p is None:
                 maxlag = min(self.max_lags, max(1, len(y) // 4))
                 sel = ar_select_order(y, maxlag=maxlag, ic="bic", old_names=False)
-                self._order = sel.ar_lags if sel.ar_lags else [1]
+                self._order = list(sel.ar_lags) if sel.ar_lags else [1]
                 self._res = sel.model.fit()
             else:
                 self._res = AutoReg(y, lags=self.p, old_names=False).fit()
                 self._order = list(range(1, self.p + 1))
+            # expose the selected lag order and coefficient summary for the UI
+            self._selected_p = int(max(self._order)) if self._order else 0
+            self._num_lags = len(self._order)
 
     def _forecast(self, h: int) -> float:
         n = len(self._y)
