@@ -187,22 +187,42 @@ with tab_overview:
     m3.metric("Sample", f"{y.index[0]:%Y} → {y.index[-1]:%Y-%m}")
     m4.metric("Observations", f"{len(y):,}")
 
-    st.markdown("")
-
     # --- Forecast chart ---
     last_date, last_val = y.index[-1], float(y.iloc[-1])
     fc_dates = [last_date + step * h for h in range(1, horizon + 1)]
 
+    # Range-preset UI as Streamlit buttons: keep the chart itself clean, and let
+    # Streamlit re-run when a preset is picked. State survives reruns.
+    RANGES = [("1Y", 1), ("2Y", 2), ("3Y", 3), ("5Y", 5),
+              ("10Y", 10), ("20Y", 20), ("All", None)]
+    if "range_years" not in st.session_state:
+        st.session_state["range_years"] = 5    # sensible default
+
+    r_cols = st.columns([1] * len(RANGES) + [6])
+    for (label, yrs), col in zip(RANGES, r_cols[:-1]):
+        active = st.session_state["range_years"] == yrs
+        if col.button(label, key=f"rng_{label}",
+                      use_container_width=True,
+                      type=("primary" if active else "secondary")):
+            st.session_state["range_years"] = yrs
+
+    yrs = st.session_state["range_years"]
+    if yrs is None:
+        view_start = y.index[0]
+    else:
+        view_start = max(y.index[0], last_date - pd.DateOffset(years=yrs))
+    view_end = fc_dates[-1] + pd.DateOffset(months=1 if freq == "M" else 3)
+
     fig = go.Figure()
 
-    # Realized inflation over full history — range-buttons let the user re-scope.
+    # Realized inflation
     fig.add_trace(go.Scatter(
         x=y.index, y=y.values, name="Realized inflation",
         line=dict(color=COLORS["realized"], width=2.5),
         hovertemplate="%{x|%b %Y}<br><b>%{y:.2f}%</b><extra>Realized</extra>",
     ))
 
-    # Shaded forecast band + vertical marker at "now"
+    # Shaded forecast band + vertical "now" marker
     fig.add_vrect(x0=last_date, x1=fc_dates[-1], fillcolor=COLORS["band"],
                   line_width=0, layer="below")
     fig.add_vline(x=last_date,
@@ -227,56 +247,33 @@ with tab_overview:
             except Exception as e:
                 st.warning(f"{infos[k].name} failed: {e}")
 
-    # Annotate "forecast" over the shaded region
+    # "forecast" text over the shaded region
     fig.add_annotation(
         x=fc_dates[len(fc_dates) // 2], y=1, yref="paper",
         text="forecast horizon", showarrow=False,
-        font=dict(color=COLORS["muted"], size=11),
-        yshift=6,
+        font=dict(color=COLORS["muted"], size=11), yshift=8,
     )
 
-    # Range-selector buttons + range slider (mirrors the ISMI webapp).
     fig.update_layout(**CHART_LAYOUT)
     fig.update_layout(
-        height=520,
+        height=480,
         title=dict(
             text=f"<b>{labels.get(infl_key, infl_key)}</b> — realized and forecast",
             x=0.0, xanchor="left", font=dict(size=16),
         ),
-        xaxis=dict(
-            **CHART_LAYOUT["xaxis"],
-            rangeselector=dict(
-                buttons=[
-                    dict(count=1, label="1Y", step="year", stepmode="backward"),
-                    dict(count=2, label="2Y", step="year", stepmode="backward"),
-                    dict(count=3, label="3Y", step="year", stepmode="backward"),
-                    dict(count=5, label="5Y", step="year", stepmode="backward"),
-                    dict(count=10, label="10Y", step="year", stepmode="backward"),
-                    dict(step="all", label="All"),
-                ],
-                bgcolor="white", bordercolor=COLORS["grid"], borderwidth=1,
-                x=1.0, xanchor="right", y=1.10, yanchor="bottom",
-                font=dict(size=11), activecolor="#e0e7ff",
-            ),
-            rangeslider=dict(visible=True, thickness=0.05,
-                             bgcolor="#f8fafc"),
-            type="date",
-        ),
+        xaxis=dict(**CHART_LAYOUT["xaxis"], type="date",
+                   range=[view_start, view_end]),
         yaxis=dict(**CHART_LAYOUT["yaxis"],
                    title=dict(text="Annualized inflation", standoff=8)),
     )
 
-    # Default view = last 5 years (users can widen with the range-selector buttons).
-    default_start = (last_date - pd.DateOffset(years=5)).strftime("%Y-%m-%d")
-    default_end = fc_dates[-1].strftime("%Y-%m-%d")
-    fig.update_xaxes(range=[default_start, default_end])
-
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True,
+                    config={"displayModeBar": False})
     st.caption(
         f"Solid line: realized {labels.get(infl_key, infl_key)}. Dotted lines: each "
         f"model's forecast path from now to {horizon} periods ahead. Use the range "
-        f"buttons (top-right) or the slider (bottom) to zoom in and out. Colors: "
-        f"grey = benchmark, blue = statistical, red = structural."
+        f"buttons above the chart to zoom in and out. Colors: grey = benchmark, "
+        f"blue = statistical, red = structural."
     )
 
     # --- Forecast summary table ---
@@ -332,12 +329,18 @@ with tab_overview:
                     except Exception:
                         pass
 
-                if info.assumptions:
-                    st.markdown(f"**Key assumptions** — {info.assumptions}")
+                # New optional fields — use getattr so an older cached ModelInfo
+                # (e.g. Streamlit Cloud serving a stale class) doesn't crash.
+                assumptions = getattr(info, "assumptions", "")
+                equations = getattr(info, "equations", "")
+                data_sources = getattr(info, "data_sources", None) or []
 
-                if info.equations:
+                if assumptions:
+                    st.markdown(f"**Key assumptions** — {assumptions}")
+
+                if equations:
                     st.markdown("**Model equations**")
-                    st.latex(info.equations)
+                    st.latex(equations)
 
                 cc1, cc2 = st.columns(2)
                 if info.strengths:
@@ -348,12 +351,11 @@ with tab_overview:
                     st.markdown(f"**Shape on the chart** — {info.forecast_shape}")
 
                 # Data sources.
-                if info.data_sources:
+                if data_sources:
                     st.markdown("**Data sources**")
-                    md = "\n".join(
-                        f"- [{label}]({url})" for label, url in info.data_sources
+                    st.markdown(
+                        "\n".join(f"- [{label}]({url})" for label, url in data_sources)
                     )
-                    st.markdown(md)
 
     # --- UCSV-SV decomposition, when selected ---
     if "ucsvsv" in chosen:
@@ -517,16 +519,18 @@ with tab_models:
                     st.caption(i.citation)
                 if i.unique:
                     st.markdown(f"**Distinctive feature** — {i.unique}")
-                if i.assumptions:
-                    st.markdown(f"**Key assumptions** — {i.assumptions}")
-                if i.equations:
+                assumptions = getattr(i, "assumptions", "")
+                equations = getattr(i, "equations", "")
+                data_sources = getattr(i, "data_sources", None) or []
+                if assumptions:
+                    st.markdown(f"**Key assumptions** — {assumptions}")
+                if equations:
                     st.markdown("**Model equations**")
-                    st.latex(i.equations)
+                    st.latex(equations)
                 if i.needs_activity:
                     st.caption("Uses an activity/slack variable (unemployment gap).")
-                if i.data_sources:
+                if data_sources:
                     st.markdown("**Data sources**")
                     st.markdown(
-                        "\n".join(f"- [{label}]({url})"
-                                  for label, url in i.data_sources)
+                        "\n".join(f"- [{label}]({url})" for label, url in data_sources)
                     )
