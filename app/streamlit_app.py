@@ -30,6 +30,14 @@ if not os.environ.get("FRED_API_KEY"):
 from src.data import fred
 from src.evaluation.backtest import run_backtest
 from src.models import registry
+from src.models.model_extras import EXTRAS as _MODEL_EXTRAS
+
+
+def model_extras(key: str) -> dict:
+    """Return the (data_sources, assumptions, equations) trio for a model key,
+    reading from the extras dict directly. Robust to a stale cached ModelInfo
+    class on Streamlit Cloud (which may lack these fields)."""
+    return _MODEL_EXTRAS.get(key) or {}
 
 st.set_page_config(page_title="Inflation Forecasting Dashboard", layout="wide",
                    page_icon="📈")
@@ -37,15 +45,35 @@ st.set_page_config(page_title="Inflation Forecasting Dashboard", layout="wide",
 # --------------------------------------------------------------------------- #
 # Design tokens
 # --------------------------------------------------------------------------- #
+def _is_dark_theme() -> bool:
+    """Best-effort read of Streamlit's active theme. Falls back to light."""
+    try:
+        base = st.get_option("theme.base")
+        if base:
+            return str(base).lower() == "dark"
+    except Exception:
+        pass
+    # Newer Streamlit exposes context.theme.type
+    try:
+        return getattr(st.context.theme, "type", "light").lower() == "dark"
+    except Exception:
+        return False
+
+
+DARK = _is_dark_theme()
+
+# Theme-aware ink / grid / band, but keep the *forecast* line colors constant so
+# the same model reads the same on either theme.
 COLORS = {
-    "ink": "#0f172a",           # near-black
-    "muted": "#64748b",         # slate
-    "grid": "#e2e8f0",          # light gridline
-    "band": "rgba(15, 23, 42, 0.04)",  # forecast shading
-    "realized": "#0f172a",
-    "Benchmark":   "#94a3b8",   # slate
-    "Statistical": "#2563eb",   # blue
-    "Structural":  "#dc2626",   # red
+    "ink":      "#e5e7eb" if DARK else "#0f172a",
+    "muted":    "#94a3b8" if DARK else "#64748b",
+    "grid":     "rgba(148,163,184,0.25)" if DARK else "#e2e8f0",
+    "band":     "rgba(148,163,184,0.10)" if DARK else "rgba(15,23,42,0.04)",
+    "realized": "#f8fafc" if DARK else "#0f172a",
+    # Family colors used in the tables/captions
+    "Benchmark":   "#94a3b8",
+    "Statistical": "#60a5fa" if DARK else "#2563eb",
+    "Structural":  "#f87171" if DARK else "#dc2626",
 }
 # Distinct colors within a family so multiple models can be told apart on the chart.
 PALETTE = {
@@ -65,22 +93,30 @@ def color_for(key: str, family: str, chosen: list[str]) -> str:
     return pal[idx % len(pal)]
 
 
-# Global Plotly template — clean, minimal, similar in spirit to the ISMI webapp.
+# Global Plotly template — clean, minimal, theme-aware. Transparent backgrounds
+# and theme-driven text/grid colors let the chart blend into either light or
+# dark Streamlit themes without any hard-coded white panels.
 CHART_LAYOUT = dict(
-    template="simple_white",
+    template="plotly_dark" if DARK else "simple_white",
     font=dict(family="Inter, system-ui, -apple-system, Segoe UI, sans-serif",
               size=13, color=COLORS["ink"]),
-    plot_bgcolor="white",
-    paper_bgcolor="white",
+    plot_bgcolor="rgba(0,0,0,0)",
+    paper_bgcolor="rgba(0,0,0,0)",
     hovermode="x unified",
-    hoverlabel=dict(bgcolor="white", bordercolor=COLORS["grid"],
-                    font=dict(family="Inter, system-ui, sans-serif", size=12)),
+    hoverlabel=dict(
+        bgcolor="rgba(30,41,59,0.95)" if DARK else "rgba(255,255,255,0.95)",
+        bordercolor=COLORS["grid"],
+        font=dict(family="Inter, system-ui, sans-serif", size=12,
+                  color=COLORS["ink"]),
+    ),
     xaxis=dict(showgrid=False, showline=True, linecolor=COLORS["grid"],
-               ticks="outside", tickcolor=COLORS["grid"], tickfont=dict(size=12)),
+               ticks="outside", tickcolor=COLORS["grid"],
+               tickfont=dict(size=12, color=COLORS["ink"])),
     yaxis=dict(gridcolor=COLORS["grid"], zeroline=False, showline=False,
-               tickfont=dict(size=12), ticksuffix="%"),
+               tickfont=dict(size=12, color=COLORS["ink"]),
+               ticksuffix="%"),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
-                bgcolor="rgba(0,0,0,0)", font=dict(size=12)),
+                bgcolor="rgba(0,0,0,0)", font=dict(size=12, color=COLORS["ink"])),
     margin=dict(t=50, b=40, l=10, r=20),
 )
 
@@ -256,17 +292,21 @@ with tab_overview:
 
     fig.update_layout(**CHART_LAYOUT)
     fig.update_layout(
-        height=480,
-        title=dict(
-            text=f"<b>{labels.get(infl_key, infl_key)}</b> — realized and forecast",
-            x=0.0, xanchor="left", font=dict(size=16),
-        ),
+        height=460,
+        margin=dict(t=30, b=40, l=10, r=20),
         xaxis=dict(**CHART_LAYOUT["xaxis"], type="date",
                    range=[view_start, view_end]),
         yaxis=dict(**CHART_LAYOUT["yaxis"],
-                   title=dict(text="Annualized inflation", standoff=8)),
+                   title=dict(text="Annualized inflation",
+                              standoff=8,
+                              font=dict(color=COLORS["ink"]))),
     )
 
+    # Use a native Streamlit heading instead of Plotly's title, so it picks up
+    # the same font/color as the rest of the page (light OR dark theme).
+    st.markdown(
+        f"#### {labels.get(infl_key, infl_key)} — realized and forecast"
+    )
     st.plotly_chart(fig, use_container_width=True,
                     config={"displayModeBar": False})
     st.caption(
@@ -329,11 +369,13 @@ with tab_overview:
                     except Exception:
                         pass
 
-                # New optional fields — use getattr so an older cached ModelInfo
-                # (e.g. Streamlit Cloud serving a stale class) doesn't crash.
-                assumptions = getattr(info, "assumptions", "")
-                equations = getattr(info, "equations", "")
-                data_sources = getattr(info, "data_sources", None) or []
+                # Read new fields from EXTRAS directly (belt-and-braces in case
+                # Streamlit Cloud has cached a pre-extras ModelInfo class).
+                ex = model_extras(k)
+                assumptions = ex.get("assumptions") or getattr(info, "assumptions", "")
+                equations = ex.get("equations") or getattr(info, "equations", "")
+                data_sources = (ex.get("data_sources")
+                                or getattr(info, "data_sources", None) or [])
 
                 if assumptions:
                     st.markdown(f"**Key assumptions** — {assumptions}")
@@ -375,8 +417,10 @@ with tab_overview:
                                     name="Trend τ (posterior mean)",
                                     line=dict(color=COLORS["Structural"], width=2.5)))
             ft.update_layout(**CHART_LAYOUT)
-            ft.update_layout(height=320, title="Trend inflation")
-            st.plotly_chart(ft, use_container_width=True)
+            ft.update_layout(height=320, margin=dict(t=30, b=30, l=10, r=20))
+            st.markdown("###### Trend inflation")
+            st.plotly_chart(ft, use_container_width=True,
+                            config={"displayModeBar": False})
         with d2:
             fv = go.Figure()
             fv.add_trace(go.Scatter(x=idx, y=m.sigma_eta_path_,
@@ -386,8 +430,10 @@ with tab_overview:
                                     name="σ transitory",
                                     line=dict(color=COLORS["Statistical"])))
             fv.update_layout(**CHART_LAYOUT)
-            fv.update_layout(height=320, title="Stochastic volatility")
-            st.plotly_chart(fv, use_container_width=True)
+            fv.update_layout(height=320, margin=dict(t=30, b=30, l=10, r=20))
+            st.markdown("###### Stochastic volatility")
+            st.plotly_chart(fv, use_container_width=True,
+                            config={"displayModeBar": False})
 
 # --------------------------------------------------------------------------- #
 # Tab 2 — evaluation / backtest
@@ -480,13 +526,11 @@ Repeat across many origins and score the resulting forecast errors.
             fig2.update_layout(**CHART_LAYOUT)
             fig2.update_layout(
                 height=460,
-                title=dict(
-                    text=(f"<b>Out-of-sample forecasts vs. realized</b> "
-                          f"(h = {horizon} periods)"),
-                    x=0.0, xanchor="left", font=dict(size=15),
-                ),
+                margin=dict(t=30, b=40, l=10, r=20),
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.markdown(f"#### Out-of-sample forecasts vs. realized (h = {horizon} periods)")
+            st.plotly_chart(fig2, use_container_width=True,
+                            config={"displayModeBar": False})
 
             st.caption(
                 "Each dot on a model's line is what that model **would have** forecast "
@@ -519,9 +563,13 @@ with tab_models:
                     st.caption(i.citation)
                 if i.unique:
                     st.markdown(f"**Distinctive feature** — {i.unique}")
-                assumptions = getattr(i, "assumptions", "")
-                equations = getattr(i, "equations", "")
-                data_sources = getattr(i, "data_sources", None) or []
+                # Read the three added fields from EXTRAS directly (belt-and-braces
+                # in case Streamlit Cloud has cached a pre-extras ModelInfo class).
+                ex = model_extras(i.key)
+                assumptions = ex.get("assumptions") or getattr(i, "assumptions", "")
+                equations = ex.get("equations") or getattr(i, "equations", "")
+                data_sources = (ex.get("data_sources")
+                                or getattr(i, "data_sources", None) or [])
                 if assumptions:
                     st.markdown(f"**Key assumptions** — {assumptions}")
                 if equations:
