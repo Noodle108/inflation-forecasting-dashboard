@@ -202,8 +202,9 @@ y = data.series(infl_key)
 X = data.activity if not data.activity.empty else None
 step = pd.DateOffset(months=1 if freq == "M" else 3)
 
-tab_overview, tab_eval, tab_models = st.tabs(
-    ["📊 Data & Forecasts", "🏆 Evaluation", "📚 Model Library"]
+tab_overview, tab_eval, tab_fw, tab_models = st.tabs(
+    ["📊 Data & Forecasts", "🏆 Evaluation",
+     "🐎 Faust–Wright", "📚 Model Library"]
 )
 
 # --------------------------------------------------------------------------- #
@@ -563,7 +564,187 @@ Repeat across many origins and score the resulting forecast errors.
                 "**Run backtest**.")
 
 # --------------------------------------------------------------------------- #
-# Tab 3 — model library
+# Tab 3 — Faust–Wright horse race
+# --------------------------------------------------------------------------- #
+from src.evaluation.fw_horserace import run_fw_horserace
+from src.models.registry import FW_BENCHMARK_KEY, FW_TABLE_KEYS
+
+with tab_fw:
+    st.markdown("### Faust–Wright (2013) horse race")
+    st.markdown(
+        """
+Faust & Wright's chapter *Forecasting Inflation* (Handbook of Economic Forecasting,
+vol. 2A, ch. 1) runs a comprehensive horse race of inflation-forecasting methods.
+Their headline object is **Table 1.2**: for each model and each horizon
+h = 0, 1, 2, 3, 4, 8 quarters, they report RMSPE relative to a stern benchmark —
+an AR(1) in gap form with ρ pinned to 0.46, hand-picked from a 1985-vintage
+GDP-deflator fit. **rel_RMSPE < 1 means the model beats the benchmark.**
+
+This tab rebuilds their exercise with the models we can implement on FRED-only
+data. Their subjective forecasts (Blue-Chip, SPF, Greenbook) — which they find are
+the *frontier* of forecast accuracy — are not on FRED and are omitted.
+        """
+    )
+
+    with st.expander("Models included (Faust–Wright Table 1.2 rows)"):
+        rows = []
+        for k in FW_TABLE_KEYS:
+            i = infos.get(k)
+            if i is None:
+                continue
+            rows.append({"Table 1.2 row": i.reference.split("—")[-1].strip()
+                                          if "—" in i.reference else i.reference,
+                         "Model": i.name, "Family": i.family})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption(
+            "Omitted rows: Blue-Chip / SPF / Greenbook subjective forecasts (survey "
+            "data not on FRED). Faust–Wright find these are the best forecasters — "
+            "they are the frontier every model is trying to reach."
+        )
+
+    st.markdown("#### Configuration")
+    fw_c1, fw_c2, fw_c3 = st.columns([2, 2, 2])
+    with fw_c1:
+        fw_infl = st.selectbox(
+            "Inflation measure",
+            options=list(data.inflation.columns),
+            format_func=lambda k: labels.get(k, k),
+            key="fw_infl",
+        )
+    with fw_c2:
+        default_horizons = [0, 1, 2, 3, 4, 8] if freq == "Q" else [0, 1, 3, 6, 12, 24]
+        fw_horizons = st.multiselect(
+            "Horizons (in periods)",
+            options=list(range(0, 25)),
+            default=default_horizons,
+            help=("FW use quarterly horizons 0..8. On the monthly setting we default to "
+                  "0,1,3,6,12,24 as the direct analogue."),
+        )
+    with fw_c3:
+        y_fw = data.series(fw_infl)
+        fw_min_train = st.slider(
+            "Minimum training window",
+            min_value=40, max_value=int(min(400, max(80, len(y_fw) - 30))),
+            value=min(80, len(y_fw) - 30), step=4,
+            key="fw_min_train",
+        )
+        fw_step = st.selectbox("Origin step", [1, 2, 4, 6, 12], index=2, key="fw_step",
+                               help="Bigger step = fewer origins = faster run.")
+
+    fw_all_keys = [k for k in FW_TABLE_KEYS if k in infos]
+    default_selected = [k for k in fw_all_keys
+                        if k not in ("sw07", "fw_dsgegap", "tvpvar", "fw_ewa")]
+    fw_selected = st.multiselect(
+        "Models to include (uncheck slow ones — SW07, DSGE-GAP, TVP-VAR, EWA — "
+        "if you want a quick run)",
+        options=fw_all_keys, default=default_selected,
+        format_func=lambda k: infos[k].name, key="fw_selected",
+    )
+
+    n_origins_est = max(0, (len(y_fw) - fw_min_train - max(fw_horizons or [1])) // fw_step + 1)
+    st.caption(
+        f"Plan: **{n_origins_est}** origins × **{len(fw_selected)}** models = "
+        f"~{n_origins_est * len(fw_selected)} model-fits at up to "
+        f"**{len(fw_horizons or [])}** horizons each. FW's exact exercise ran on "
+        f"quarterly data with ~108 origins."
+    )
+    run_fw = st.button("Run Faust–Wright horse race", type="primary", key="run_fw")
+
+    if run_fw:
+        if not fw_selected or not fw_horizons:
+            st.error("Pick at least one model and one horizon.")
+        else:
+            keys = (fw_selected if FW_BENCHMARK_KEY in fw_selected
+                    else [FW_BENCHMARK_KEY] + fw_selected)
+            bar = st.progress(0.0, text="Running horse race…")
+            X_fw = data.activity if not data.activity.empty else None
+            res = run_fw_horserace(
+                y_fw, X_fw, keys, sorted(fw_horizons),
+                benchmark_key=FW_BENCHMARK_KEY,
+                min_train=fw_min_train, step=fw_step,
+                progress=lambda p: bar.progress(min(1.0, p), text="Running horse race…"),
+            )
+            bar.empty()
+
+            st.markdown(
+                f"#### RMSPE relative to benchmark ({infos[FW_BENCHMARK_KEY].name})"
+            )
+            # Rename rows to human model names
+            display = res.rel_rmspe.copy()
+            display.index = [infos[k].name for k in display.index]
+            display.columns = [f"h={h}" for h in display.columns]
+
+            def _bg(v):
+                if pd.isna(v):
+                    return ""
+                x = max(0.5, min(1.5, float(v)))
+                if x <= 1.0:
+                    t = (x - 0.5) / 0.5
+                    r = int(200 + t * 55); g = 240; b = int(200 + t * 55)
+                else:
+                    t = (x - 1.0) / 0.5
+                    r = 255; g = int(240 - t * 100); b = int(255 - t * 155)
+                return f"background-color: rgba({r},{g},{b},0.55);"
+
+            st.dataframe(
+                display.style.format("{:.2f}").map(_bg),
+                use_container_width=True,
+            )
+            st.caption(
+                "Cells < 1.00 (green) = model beats the benchmark at that horizon; "
+                "cells > 1.00 (red) = benchmark beats the model. The benchmark row is "
+                "flat 1.00 by construction."
+            )
+
+            # Absolute RMSPE table for reference
+            with st.expander("Absolute RMSPE (percentage points)"):
+                abs_df = res.rmspe.copy()
+                abs_df.index = [infos[k].name for k in abs_df.index]
+                abs_df.columns = [f"h={h}" for h in abs_df.columns]
+                st.dataframe(abs_df.style.format("{:.3f}"),
+                             use_container_width=True)
+
+            # Chart: relative RMSPE curves across horizons
+            fig_fw = go.Figure()
+            for k in keys:
+                ys = res.rel_rmspe.loc[k].values
+                fig_fw.add_trace(go.Scatter(
+                    x=[f"h={h}" for h in res.horizons], y=ys,
+                    name=infos[k].name,
+                    line=dict(color=color_for(k, infos[k].family, list(keys)),
+                              width=2),
+                    hovertemplate=f"{infos[k].name}<br>%{{x}}: %{{y:.2f}}<extra></extra>",
+                ))
+            fig_fw.add_hline(y=1.0, line=dict(color=COLORS["muted"], dash="dot",
+                                              width=1),
+                             annotation_text="benchmark",
+                             annotation_position="right",
+                             annotation_font_color=COLORS["muted"])
+            fig_fw.update_layout(**CHART_LAYOUT)
+            fig_fw.update_layout(height=460, margin=dict(t=30, b=40, l=10, r=20),
+                                 yaxis_title="Relative RMSPE")
+            st.markdown("#### Relative RMSPE across horizons")
+            st.plotly_chart(fig_fw, use_container_width=True,
+                            config={"displayModeBar": False})
+
+            st.caption(
+                f"n valid pairs per model: {int(res.n.iloc[0].max())} at h={res.horizons[0]}, "
+                f"{int(res.n.iloc[0].min())} at h={res.horizons[-1]}. "
+                "Faust–Wright's key qualitative findings: (i) subjective forecasts (SPF, "
+                "Greenbook, Blue-Chip — not shown here) dominate all model-based ones; "
+                "(ii) gap-form models substantially outperform stationary models at "
+                "medium and long horizons; (iii) the fixed-ρ benchmark is remarkably "
+                "hard to beat by more than ~10%."
+            )
+    else:
+        st.info(
+            "Choose a configuration above, then click **Run Faust–Wright horse race**. "
+            "A quick run with default settings takes ~30–60 seconds."
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Tab 4 — model library
 # --------------------------------------------------------------------------- #
 with tab_models:
     st.markdown(

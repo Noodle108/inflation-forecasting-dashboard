@@ -330,7 +330,160 @@ EXTRAS: dict[str, dict] = {
                    r"\pi_{t+h|t}=E_t\bar\pi_{t,h}\text{ from the fitted curve}"),
     ),
 
-    "cpi_data": None,  # placeholder — never registered, just to keep this dict tidy
+    # ----- Faust–Wright (2013) horse-race -----
+    "fw_direct": dict(
+        data_sources=[_fred("CPIAUCSL", "CPI (headline)"),
+                      _fred("PCEPI", "PCE (headline)"),
+                      _fred("GDPDEF", "GDP deflator"),
+                      _fred("CPILFESL", "Core CPI")],
+        assumptions=(
+            "Inflation is stationary; the AR(p) coefficients are constant across the "
+            "sample. Direct h-step regression means each horizon has its own OLS fit."
+        ),
+        equations=r"\pi_{t+h} \;=\; \rho_0 + \sum_{j=1}^{p} \rho_j \pi_{t-j} + \varepsilon_{t+h}",
+    ),
+    "fw_rar": dict(
+        data_sources=[_fred("CPIAUCSL", "CPI (headline)"),
+                      _fred("PCEPI", "PCE (headline)"),
+                      _fred("GDPDEF", "GDP deflator")],
+        assumptions=(
+            "Stationary AR(p) on inflation levels; one-step forecast is iterated h times. "
+            "Optimal under correct specification (Marcellino-Stock-Watson 2006)."
+        ),
+        equations=(r"\pi_t=\rho_0+\sum_{j=1}^{p}\rho_j\pi_{t-j}+\varepsilon_t;\ "
+                   r"\hat\pi_{T+h}=\text{iterate 1-step forecast forward }h\text{ times}"),
+    ),
+    "fw_pc": dict(
+        data_sources=[_fred("CPIAUCSL", "CPI (headline)"),
+                      _fred("PCEPI", "PCE (headline)"),
+                      _fred("GDPDEF", "GDP deflator"),
+                      _fred("UNRATE", "Unemployment rate")],
+        assumptions=(
+            "Backward-looking (accelerationist) Phillips curve in levels; unemployment "
+            "measures slack. Direct h-step regression."
+        ),
+        equations=r"\pi_{t+h} \;=\; \rho_0 + \sum_{j=1}^{p} \rho_j \pi_{t-j} + \lambda u_{t-1} + \varepsilon_{t+h}",
+    ),
+    "fw_argap": dict(
+        data_sources=[_fred("CPIAUCSL", "CPI (headline)"),
+                      _fred("PCEPI", "PCE (headline)"),
+                      _fred("GDPDEF", "GDP deflator")],
+        assumptions=(
+            "Inflation = drifting trend τ_t + stationary gap g_t. Trend is a random walk "
+            "approximated by exponential smoothing (α=0.95, FW footnote 8). Gap follows "
+            "an AR(p) with p chosen by BIC."
+        ),
+        equations=(r"g_t=\pi_t-\tau_t;\ g_{t+h}=\rho_0+\sum_{j=1}^{p}\rho_j g_{t-j}+\varepsilon_{t+h};\ "
+                   r"\hat\pi_{T+h}=\tau_T+\hat g_{T+h}"),
+    ),
+    "fw_fixedrho": dict(
+        data_sources=[_fred("CPIAUCSL", "CPI (headline)"),
+                      _fred("PCEPI", "PCE (headline)"),
+                      _fred("GDPDEF", "GDP deflator")],
+        assumptions=(
+            "AR(1) in gap form with ρ pinned to 0.46 (FW's value from a 1985 GDP-deflator "
+            "vintage). No parameter estimation whatsoever — pure trend + fixed decay."
+        ),
+        equations=r"g_t=\rho\,g_{t-1}+\varepsilon_t,\ \rho=0.46;\ \hat\pi_{T+h}=\tau_T+\rho^h g_T",
+    ),
+    "fw_pcgap": dict(
+        data_sources=[_fred("CPIAUCSL", "CPI (headline)"),
+                      _fred("PCEPI", "PCE (headline)"),
+                      _fred("GDPDEF", "GDP deflator"),
+                      _fred("UNRATE", "Unemployment rate")],
+        assumptions=(
+            "Phillips curve applied to the inflation gap; unemployment is the slack "
+            "measure. Trend τ_t is exponentially smoothed inflation."
+        ),
+        equations=r"g_{t+h}=\rho_0+\sum_{j=1}^{p}\rho_j g_{t-j}+\lambda u_{t-1}+\varepsilon_{t+h};\ \hat\pi_{T+h}=\tau_T+\hat g_{T+h}",
+    ),
+    "fw_pctvngap": dict(
+        data_sources=[_fred("CPIAUCSL", "CPI (headline)"),
+                      _fred("PCEPI", "PCE (headline)"),
+                      _fred("GDPDEF", "GDP deflator"),
+                      _fred("UNRATE", "Unemployment rate")],
+        assumptions=(
+            "PC-gap with slack measured relative to a **time-varying NAIRU** u*. FW use "
+            "the Blue-Chip 5-10y unemployment survey for u*; we substitute FW's own "
+            "exponential-smoothing fallback (α=0.95) on realized unemployment."
+        ),
+        equations=r"g_{t+h}=\rho_0+\sum_{j=1}^{p}\rho_j g_{t-j}+\lambda(u_{t-1}-u^*_{t-1})+\varepsilon_{t+h}",
+    ),
+    "fw_tsvar": dict(
+        data_sources=[_fred("CPIAUCSL", "CPI (headline)"), _fred("UNRATE", "Unemployment"),
+                      _fred("TB3MS", "3-mo T-bill"), _fred("GS1", "1-yr Treasury"),
+                      _fred("GS2", "2-yr Treasury"), _fred("GS5", "5-yr Treasury"),
+                      _fred("GS10", "10-yr Treasury")],
+        assumptions=(
+            "No-arbitrage restrictions on the yield curve are **not** imposed (Joslin-"
+            "Le-Singleton show they are empirically inconsequential). Nelson-Siegel "
+            "shape parameter λ=0.0609 fixed (Diebold-Li). VAR(1) in "
+            "[level, slope, curvature, inflation-gap, unemployment]."
+        ),
+        equations=(r"y_t(n)=\beta_{1t}+\beta_{2t}\tfrac{1-e^{-\lambda n}}{\lambda n}"
+                   r"+\beta_{3t}\left(\tfrac{1-e^{-\lambda n}}{\lambda n}-e^{-\lambda n}\right);\ "
+                   r"\xi_t=(\beta_{1t},\beta_{2t},\beta_{3t},g_t,u_t)'\text{ follows VAR(1)}"),
+    ),
+    "fw_ewa": dict(
+        data_sources=[
+            _fred("INDPRO", "Industrial production"), _fred("PAYEMS", "Nonfarm payrolls"),
+            _fred("UNRATE", "Unemployment"), _fred("HOUST", "Housing starts"),
+            _fred("UMCSENT", "Michigan consumer sentiment"), _fred("M2SL", "M2"),
+            _fred("FEDFUNDS", "Federal funds rate"), _fred("GS10", "10-yr Treasury"),
+            _fred("BAA10YM", "BAA credit spread"), _fred("MCOILWTICO", "WTI crude"),
+            _fred("SP500", "S&P 500"), ("… ~30 FRED series in total", "https://fred.stlouisfed.org/"),
+        ],
+        assumptions=(
+            "Each predictor enters its own gap regression augmented with p lags of the "
+            "gap. Combination is arithmetic mean of the resulting n forecasts "
+            "(Bates-Granger 1969). No prior on models."
+        ),
+        equations=(r"g_{t+h}=\rho_0+\sum_j\rho_j g_{t-j}+\beta_i x_{i,t-1}+\varepsilon_{it+h}\ (i=1..n);\ "
+                   r"\hat g_{T+h}=\frac{1}{n}\sum_{i=1}^{n}\hat g^{(i)}_{T+h}"),
+    ),
+    "fw_bma": dict(
+        data_sources=[
+            _fred("INDPRO", "Industrial production"), _fred("PAYEMS", "Nonfarm payrolls"),
+            _fred("UNRATE", "Unemployment"), _fred("BAA10YM", "BAA credit spread"),
+            ("… ~30 FRED series in total", "https://fred.stlouisfed.org/"),
+        ],
+        assumptions=(
+            "Same single-predictor regressions as EWA; posterior weights ∝ exp(-½·BIC) "
+            "(Schwarz approximation to log marginal likelihood). Flat prior across "
+            "models; Fernandez-Ley-Steel g-prior on coefficients (FW use φ=2)."
+        ),
+        equations=r"w_i \;\propto\; \exp(-\tfrac{1}{2}\,\text{BIC}_i);\ \hat g_{T+h}=\sum_{i=1}^{n} w_i\,\hat g^{(i)}_{T+h}",
+    ),
+    "fw_favar": dict(
+        data_sources=[
+            _fred("INDPRO", "Industrial production"), _fred("PAYEMS", "Nonfarm payrolls"),
+            _fred("UNRATE", "Unemployment"), _fred("BAA10YM", "BAA credit spread"),
+            ("… ~30 FRED series in total", "https://fred.stlouisfed.org/"),
+        ],
+        assumptions=(
+            "First m=3 principal components z_1..z_m of the standardized panel are "
+            "treated as observable factors. VAR(1) in (g, z_1, ..., z_m)."
+        ),
+        equations=r"\xi_t=(g_t,z_{1t},...,z_{mt})';\ \xi_t=\mu_0+\sum_j \mu_j \xi_{t-j}+\varepsilon_t",
+    ),
+    "fw_dsgegap": dict(
+        data_sources=[
+            _fred("GDPC1", "Real GDP"), _fred("PCECC96", "Real consumption"),
+            _fred("GPDIC1", "Real investment"), _fred("GDPDEF", "GDP deflator"),
+            _fred("HOANBS", "Hours worked"), _fred("COMPRNFB", "Real compensation"),
+            _fred("FEDFUNDS", "Federal funds rate"), _fred("CNP16OV", "Civilian population"),
+        ],
+        assumptions=(
+            "Full SW07 DSGE (rational expectations, sticky prices/wages, capital with "
+            "adjustment costs, habits, Taylor rule, seven structural shocks) but the "
+            "long-run steady-state inflation prior is **replaced by the exponentially "
+            "smoothed local mean τ_t**. FW's device to remove look-back bias in the "
+            "SW07 prior."
+        ),
+        equations=r"\hat\pi^{DSGE\text{-}GAP}_{T+h}=\hat\pi^{SW07}_{T+h}-\bar\pi^{SW07}+\tau_T",
+    ),
+
+    "cpi_data": None,  # placeholder — never registered
 }
 
 

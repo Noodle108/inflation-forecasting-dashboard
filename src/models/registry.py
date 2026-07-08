@@ -16,6 +16,10 @@ from .bvar import BVAR, BVARHierarchical
 from .cleveland_expectations import ClevelandExpectations
 from .cleveland_nowcast import ClevelandNowcast
 from .dsge import NewKeynesianPC, SmallScaleDSGE
+from .faust_wright import (
+    ARGap, BMALargeDS, DSGEGap, DirectAR, EWALargeDS, FAVARLargeDS,
+    FixedRhoGap, PCGap, PCTVNGap, PhillipsFW, RecursiveAR, TermStructureVAR,
+)
 from .nyfed_dsge import NYFedDSGE
 from .phillips import PhillipsCurve
 from .sw2007 import SmetsWouters2007
@@ -44,7 +48,43 @@ MODELS: Dict[str, Callable[[], ForecastModel]] = {
     "bb": BernankeBlanchard,
     "nyfed": NYFedDSGE,
     "cleexp": ClevelandExpectations,
+    # ----- Faust–Wright (2013) horse-race models -----
+    "fw_direct": DirectAR,
+    "fw_rar": RecursiveAR,
+    "fw_pc": PhillipsFW,
+    "fw_argap": ARGap,
+    "fw_fixedrho": FixedRhoGap,
+    "fw_pcgap": PCGap,
+    "fw_pctvngap": PCTVNGap,
+    "fw_tsvar": TermStructureVAR,
+    "fw_ewa": EWALargeDS,
+    "fw_bma": BMALargeDS,
+    "fw_favar": FAVARLargeDS,
+    "fw_dsgegap": DSGEGap,
 }
+
+# Which model keys correspond to which line in Faust–Wright's Table 1.2. Reused
+# by the Faust–Wright tab to build the RMSPE leaderboard. Order matches Table 1.2.
+FW_TABLE_KEYS: list[str] = [
+    "fw_direct",   # Direct
+    "fw_rar",      # RAR
+    "fw_pc",       # PC
+    "rw",          # RW (already in the app)
+    "ao",          # RW-AO (already in the app; window=12 monthly / 4 quarterly)
+    "ucsv",        # UCSV (constant-vol approximation; app also has ucsvsv)
+    "fw_argap",    # AR-GAP
+    "fw_pcgap",    # PC-GAP
+    "fw_pctvngap", # PCTVN-GAP
+    "fw_tsvar",    # Term Structure VAR
+    "tvpvar",      # TVP-VAR (already in the app)
+    "fw_ewa",      # EWA
+    "fw_bma",      # BMA
+    "fw_favar",    # FAVAR
+    "sw07",        # DSGE (SW07)
+    "fw_dsgegap",  # DSGE-GAP
+    "fw_fixedrho", # Fixed ρ  (benchmark — divisor for the relative RMSPE column)
+]
+FW_BENCHMARK_KEY = "fw_fixedrho"
 
 # Default benchmark all skill scores are computed against.
 BENCHMARK_KEY = "rw"
