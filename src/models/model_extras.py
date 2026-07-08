@@ -483,6 +483,44 @@ EXTRAS: dict[str, dict] = {
         equations=r"\hat\pi^{DSGE\text{-}GAP}_{T+h}=\hat\pi^{SW07}_{T+h}-\bar\pi^{SW07}+\tau_T",
     ),
 
+    # ----- Survey benchmarks -----
+    "spf": dict(
+        data_sources=[
+            ("Philly Fed: Survey of Professional Forecasters — Mean Level Responses",
+             "https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters"),
+        ],
+        assumptions=(
+            "Pass-through of the SPF quarterly mean forecast at the requested "
+            "horizon. Faust-Wright find survey forecasts are the *frontier* of "
+            "inflation-forecast accuracy — no economic model beats them."
+        ),
+        equations=r"\hat\pi_{T+h}\;=\;\bar E^{\text{SPF}}_T[\pi_{T+h}]\quad(h=0..5)",
+    ),
+    "gb": dict(
+        data_sources=[
+            ("Philly Fed: Greenbook Data Sets",
+             "https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/greenbook-data-sets"),
+        ],
+        assumptions=(
+            "Pass-through of the Fed staff Greenbook/Tealbook forecast at the "
+            "requested horizon. Historically the single most accurate inflation "
+            "forecast — but subject to a 5-year public embargo."
+        ),
+        equations=r"\hat\pi_{T+h}\;=\;\hat\pi^{\text{Greenbook}}_{T+h}\quad(h=0..9)",
+    ),
+    "bc": dict(
+        data_sources=[
+            _fred("MICH", "Michigan 1-yr expected inflation"),
+            _fred("EXPINF1YR", "Cleveland Fed 1-yr expected inflation"),
+        ],
+        assumptions=(
+            "Blue Chip is subscription-only. This wrapper averages the two "
+            "publicly available 1-year inflation-expectation series on FRED — "
+            "which FW note are highly correlated with Blue Chip."
+        ),
+        equations=r"\hat\pi_{T+h}\;=\;\tfrac{1}{2}\left(\text{MICH}_T\!+\text{EXPINF1YR}_T\right)\ \forall h",
+    ),
+
     "cpi_data": None,  # placeholder — never registered
 }
 

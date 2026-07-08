@@ -22,6 +22,7 @@ from .faust_wright import (
 )
 from .nyfed_dsge import NYFedDSGE
 from .phillips import PhillipsCurve
+from .surveys import SurveyBlueChip, SurveyGreenbook, SurveySPF
 from .sw2007 import SmetsWouters2007
 from .sw_dfm import StockWatsonDFM
 from .tvt_nkpc import TVTNKPC
@@ -61,6 +62,10 @@ MODELS: Dict[str, Callable[[], ForecastModel]] = {
     "fw_bma": BMALargeDS,
     "fw_favar": FAVARLargeDS,
     "fw_dsgegap": DSGEGap,
+    # ----- Survey benchmarks (FW's frontier) -----
+    "spf": SurveySPF,
+    "gb": SurveyGreenbook,
+    "bc": SurveyBlueChip,
 }
 
 # Which model keys correspond to which line in Faust–Wright's Table 1.2. Reused
@@ -82,6 +87,10 @@ FW_TABLE_KEYS: list[str] = [
     "fw_favar",    # FAVAR
     "sw07",        # DSGE (SW07)
     "fw_dsgegap",  # DSGE-GAP
+    # --- Subjective survey forecasts (FW's frontier) ---
+    "bc",          # Blue Chip (surrogate: MICH + EXPINF1YR average)
+    "spf",         # SPF mean forecast (requires data/surveys/spf_mean_level.xlsx)
+    "gb",          # Greenbook (requires data/surveys/greenbook_row_format.xlsx)
     "fw_fixedrho", # Fixed ρ  (benchmark — divisor for the relative RMSPE column)
 ]
 FW_BENCHMARK_KEY = "fw_fixedrho"

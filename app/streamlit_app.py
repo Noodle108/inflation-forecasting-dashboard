@@ -592,11 +592,41 @@ h = 0, 1, 2, 3, 4, 8 quarters, they report RMSPE relative to a stern benchmark �
 an AR(1) in gap form with ρ pinned to 0.46, hand-picked from a 1985-vintage
 GDP-deflator fit. **rel_RMSPE < 1 means the model beats the benchmark.**
 
-This tab rebuilds their exercise with the models we can implement on FRED-only
-data. Their subjective forecasts (Blue-Chip, SPF, Greenbook) — which they find are
-the *frontier* of forecast accuracy — are not on FRED and are omitted.
+This tab rebuilds their exercise on FRED data, augmented (when available) with
+the three subjective survey forecasts they identify as the frontier of
+forecast accuracy: SPF, Greenbook, and a free Blue-Chip surrogate.
         """
     )
+
+    # --- Survey-data status ---
+    from src.data.surveys import survey_status
+    _sstatus = survey_status()
+    with st.expander("📥 Survey-forecast data status", expanded=(not _sstatus.spf_present or not _sstatus.gb_present)):
+        st.markdown(_sstatus.summary())
+        st.markdown(
+            """
+**How to add SPF and Greenbook data** (both are free, public downloads from
+the Philadelphia Fed):
+
+1. **SPF** — go to
+   [Philly Fed SPF Mean Responses](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters)
+   → *Data Files* → **Level Mean Responses**. Download the CPI file (or any
+   inflation measure you want). Save the .xlsx as
+   `data/surveys/spf_mean_level.xlsx` in the repo.
+
+2. **Greenbook** — go to
+   [Philly Fed Greenbook Data Sets](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/greenbook-data-sets)
+   and download the *Row Format* file. Save as
+   `data/surveys/greenbook_row_format.xlsx`. Note the 5-year public embargo.
+
+3. **Blue Chip** — subscription-only from Wolters Kluwer. This app ships a
+   **free surrogate**: the average of Michigan Survey 1-yr (MICH) and Cleveland
+   Fed 1-yr (EXPINF1YR) from FRED. No file upload needed.
+
+After adding files, redeploy on Streamlit Cloud (or restart locally) — the
+loader auto-detects the files and the survey rows appear in the horse race.
+            """
+        )
 
     with st.expander("Models included (Faust–Wright Table 1.2 rows)"):
         rows = []
@@ -642,6 +672,14 @@ the *frontier* of forecast accuracy — are not on FRED and are omitted.
         )
         fw_step = st.selectbox("Origin step", [1, 2, 4, 6, 12], index=2, key="fw_step",
                                help="Bigger step = fewer origins = faster run.")
+        _cpu = max(1, (os.cpu_count() or 2))
+        fw_workers = st.selectbox(
+            "Parallel workers", [1, 2, 4, min(8, _cpu)],
+            index=min(2, len({1, 2, 4, min(8, _cpu)}) - 1),
+            key="fw_workers",
+            help=("Number of processes to distribute the origins across. Bigger "
+                  f"= faster on multi-core machines (detected {_cpu} CPUs)."),
+        )
 
     fw_all_keys = [k for k in FW_TABLE_KEYS if k in infos]
     missing_fw = [k for k in FW_TABLE_KEYS if k not in infos]
@@ -651,8 +689,14 @@ the *frontier* of forecast accuracy — are not on FRED and are omitted.
             f"`{'`, `'.join(missing_fw)}`. This usually means the deploy is on a "
             "stale build — hit **Manage app → Reboot** on Streamlit Cloud to reload."
         )
-    default_selected = [k for k in fw_all_keys
-                        if k not in ("sw07", "fw_dsgegap", "tvpvar", "fw_ewa")]
+    # Default: skip the slow models. Include surveys that are actually available.
+    _slow = {"sw07", "fw_dsgegap", "tvpvar"}
+    default_selected = [k for k in fw_all_keys if k not in _slow]
+    # Only auto-include SPF/GB if we actually have their data files.
+    if not _sstatus.spf_present and "spf" in default_selected:
+        default_selected.remove("spf")
+    if not _sstatus.gb_present and "gb" in default_selected:
+        default_selected.remove("gb")
     fw_selected = st.multiselect(
         "Models to include (uncheck slow ones — SW07, DSGE-GAP, TVP-VAR, EWA — "
         "if you want a quick run)",
@@ -681,6 +725,7 @@ the *frontier* of forecast accuracy — are not on FRED and are omitted.
                 y_fw, X_fw, keys, sorted(fw_horizons),
                 benchmark_key=FW_BENCHMARK_KEY,
                 min_train=fw_min_train, step=fw_step,
+                n_workers=fw_workers,
                 progress=lambda p: bar.progress(min(1.0, p), text="Running horse race…"),
             )
             bar.empty()

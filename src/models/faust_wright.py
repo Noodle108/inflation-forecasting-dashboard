@@ -405,10 +405,20 @@ def _nelson_siegel_factors(yields_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(B, index=yields_df.index, columns=["b1", "b2", "b3"])
 
 
+_YIELDS_CACHE: dict[str, pd.DataFrame | None] = {}
+
+
 def _load_treasury_yields() -> pd.DataFrame | None:
-    """Fetch a Treasury yield panel (constant-maturity) from FRED, quarterly."""
+    """Fetch a Treasury yield panel (constant-maturity) from FRED, quarterly.
+
+    Cached across calls within a Python session so the horse-race doesn't
+    re-hit FRED once per origin.
+    """
+    if "yields" in _YIELDS_CACHE:
+        return _YIELDS_CACHE["yields"]
     from ..data import fred as _f
     if not _f.has_live_data():
+        _YIELDS_CACHE["yields"] = None
         return None
     ids = {0.25: "TB3MS", 0.5: "TB6MS", 1: "GS1", 2: "GS2", 3: "GS3",
            5: "GS5", 7: "GS7", 10: "GS10"}
@@ -418,9 +428,8 @@ def _load_treasury_yields() -> pd.DataFrame | None:
         if s is None:
             continue
         cols[tau] = s.resample("QS").mean()
-    if not cols:
-        return None
-    return pd.DataFrame(cols).dropna(how="all")
+    _YIELDS_CACHE["yields"] = pd.DataFrame(cols).dropna(how="all") if cols else None
+    return _YIELDS_CACHE["yields"]
 
 
 class TermStructureVAR(ForecastModel):
@@ -524,10 +533,19 @@ _LARGE_DS_FRED = dict(
 )
 
 
+_LARGE_PANEL_CACHE: dict[str, pd.DataFrame | None] = {}
+
+
 def _load_large_panel(freq: str = "Q") -> pd.DataFrame | None:
-    """Fetch a FRED-MD-flavor panel for EWA/BMA/FAVAR, transformed to stationary."""
+    """Fetch a FRED-MD-flavor panel for EWA/BMA/FAVAR, transformed to stationary.
+
+    Cached by freq across calls so the horse-race can't accidentally re-fetch.
+    """
+    if freq in _LARGE_PANEL_CACHE:
+        return _LARGE_PANEL_CACHE[freq]
     from ..data import fred as _f
     if not _f.has_live_data():
+        _LARGE_PANEL_CACHE[freq] = None
         return None
     raw = {}
     for name, sid in _LARGE_DS_FRED.items():
@@ -537,9 +555,9 @@ def _load_large_panel(freq: str = "Q") -> pd.DataFrame | None:
         s = s.resample("QS").mean() if freq == "Q" else s.resample("MS").mean()
         raw[name] = s
     if not raw:
+        _LARGE_PANEL_CACHE[freq] = None
         return None
     df = pd.DataFrame(raw)
-    # Transformations: log-diff for level series that trend, first-diff for rates.
     RATES = {"unrate", "ffr", "tb3m", "gs1", "gs5", "gs10", "baa", "aaa",
              "spread", "yield_slope", "michigan", "breakevens5", "tips10"}
     out = {}
@@ -549,7 +567,9 @@ def _load_large_panel(freq: str = "Q") -> pd.DataFrame | None:
             out[c] = s.diff()
         else:
             out[c] = 100 * np.log(s.replace({0: np.nan})).diff()
-    return pd.DataFrame(out).dropna(how="all")
+    result = pd.DataFrame(out).dropna(how="all")
+    _LARGE_PANEL_CACHE[freq] = result
+    return result
 
 
 class _LargeDSBase(ForecastModel):
@@ -601,36 +621,61 @@ class EWALargeDS(_LargeDSBase):
     )
 
     def _fit(self) -> None:
+        """Precompute *all* single-predictor regressions in numpy for O(N·H·k^2)
+        rather than statsmodels-per-predictor-per-horizon. Big speedup: horse-race
+        only calls forecast(h), so caching the regressor row here means each
+        _forecast is just a dot-product."""
         self._prepare()
-
-    def _forecast(self, h: int) -> float:
-        import statsmodels.api as sm
+        self._cache = None
         if self._panel is None or self._panel.empty:
-            return float(self._tau.iloc[-1])
+            return
         gap = self._gap
         p = bic_ar_gap_lag(gap, self.max_p)
-        # design pieces shared across predictors
-        cols_common = {f"g_l{l}": gap.shift(l) for l in range(p)}
-        y_target = gap.shift(-h)
-        preds = []
+        self._p = p
+        # Common regressor block: [1, gap_l1..gap_lp]
+        gap_vals = gap.values
+        T = len(gap_vals)
+        lag_cols = np.column_stack([np.roll(gap_vals, l + 1) for l in range(p)])
+        # for each predictor xi shift(1)
+        preds_by_col = {}
         for name in self._panel_z.columns:
-            xi = self._panel_z[name].shift(1)
-            X = pd.DataFrame({**cols_common, "x": xi})
-            df = pd.concat([y_target.rename("y"), X], axis=1).dropna()
-            if len(df) < p + 8:
+            xi_lag1 = np.roll(self._panel_z[name].values, 1)
+            # concat design: [const, gap_lags..., xi_l1]
+            preds_by_col[name] = np.column_stack([np.ones(T), lag_cols, xi_lag1])
+        # regressor row for the *end of sample*
+        self._end_row = np.concatenate(
+            [[1.0], gap_vals[-1:-1 - p:-1]]  # newest to oldest lags
+        )
+        # per-predictor latest value stored separately (spliced in per predictor)
+        self._end_x = {n: float(self._panel_z[n].iloc[-1])
+                       for n in self._panel_z.columns}
+        # store the design matrices; regression coefficients will be recomputed
+        # per horizon on the fly (fast: numpy lstsq).
+        self._design_by_pred = preds_by_col
+        self._gap_series = gap_vals
+        self._names = list(self._panel_z.columns)
+
+    def _forecast(self, h: int) -> float:
+        if getattr(self, "_design_by_pred", None) is None:
+            return float(self._tau.iloc[-1])
+        gap = self._gap_series
+        p = self._p
+        preds = []
+        target = np.roll(gap, -h)
+        for name in self._names:
+            X = self._design_by_pred[name]
+            # drop rows where target or any lag/predictor is nan/rolled
+            valid = np.arange(p, len(gap) - h)
+            if len(valid) < p + 8:
                 continue
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                res = sm.OLS(df["y"].values,
-                             sm.add_constant(df.drop(columns="y").values)).fit()
-            row = ([1.0]
-                   + [float(gap.iloc[-1 - l]) for l in range(p)]
-                   + [float(self._panel_z[name].iloc[-1])])
-            preds.append(float(res.predict(np.array(row).reshape(1, -1))[0]))
+            Xv, yv = X[valid], target[valid]
+            # numpy lstsq is much faster than statsmodels OLS here
+            beta, *_ = np.linalg.lstsq(Xv, yv, rcond=None)
+            row = np.concatenate([self._end_row, [self._end_x[name]]])
+            preds.append(float(row @ beta))
         if not preds:
             return float(self._tau.iloc[-1])
-        gap_h = float(np.mean(preds))
-        return float(self._tau.iloc[-1] + gap_h)
+        return float(self._tau.iloc[-1] + np.mean(preds))
 
 
 class BMALargeDS(_LargeDSBase):
@@ -649,39 +694,53 @@ class BMALargeDS(_LargeDSBase):
 
     def _fit(self) -> None:
         self._prepare()
-
-    def _forecast(self, h: int) -> float:
-        import statsmodels.api as sm
+        self._design_by_pred = None
         if self._panel is None or self._panel.empty:
-            return float(self._tau.iloc[-1])
+            return
         gap = self._gap
         p = bic_ar_gap_lag(gap, self.max_p)
-        cols_common = {f"g_l{l}": gap.shift(l) for l in range(p)}
-        y_target = gap.shift(-h)
-        preds, log_ml = [], []
+        self._p = p
+        gap_vals = gap.values
+        T = len(gap_vals)
+        lag_cols = np.column_stack([np.roll(gap_vals, l + 1) for l in range(p)])
+        preds_by_col = {}
         for name in self._panel_z.columns:
-            xi = self._panel_z[name].shift(1)
-            X = pd.DataFrame({**cols_common, "x": xi})
-            df = pd.concat([y_target.rename("y"), X], axis=1).dropna()
-            if len(df) < p + 8:
+            xi_lag1 = np.roll(self._panel_z[name].values, 1)
+            preds_by_col[name] = np.column_stack([np.ones(T), lag_cols, xi_lag1])
+        self._end_row = np.concatenate([[1.0], gap_vals[-1:-1 - p:-1]])
+        self._end_x = {n: float(self._panel_z[n].iloc[-1])
+                       for n in self._panel_z.columns}
+        self._design_by_pred = preds_by_col
+        self._gap_series = gap_vals
+        self._names = list(self._panel_z.columns)
+
+    def _forecast(self, h: int) -> float:
+        if self._design_by_pred is None:
+            return float(self._tau.iloc[-1])
+        gap = self._gap_series
+        p = self._p
+        preds, log_ml = [], []
+        target = np.roll(gap, -h)
+        for name in self._names:
+            X = self._design_by_pred[name]
+            valid = np.arange(p, len(gap) - h)
+            if len(valid) < p + 8:
                 continue
-            Xm = sm.add_constant(df.drop(columns="y").values)
-            y = df["y"].values
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                res = sm.OLS(y, Xm).fit()
-            # crude BIC-based model weight: log p(y|M) ≈ -0.5 * BIC (Schwarz approx)
-            log_ml.append(-0.5 * float(res.bic))
-            row = ([1.0]
-                   + [float(gap.iloc[-1 - l]) for l in range(p)]
-                   + [float(self._panel_z[name].iloc[-1])])
-            preds.append(float(res.predict(np.array(row).reshape(1, -1))[0]))
+            Xv, yv = X[valid], target[valid]
+            beta, *_ = np.linalg.lstsq(Xv, yv, rcond=None)
+            yhat = Xv @ beta
+            resid = yv - yhat
+            n, k = Xv.shape
+            sigma2 = float((resid @ resid) / max(n - k, 1))
+            # log-likelihood ≈ -n/2 log(sigma2); BIC ≈ n log(sigma2) + k log n
+            bic = n * np.log(max(sigma2, 1e-12)) + k * np.log(max(n, 2))
+            log_ml.append(-0.5 * bic)
+            row = np.concatenate([self._end_row, [self._end_x[name]]])
+            preds.append(float(row @ beta))
         if not preds:
             return float(self._tau.iloc[-1])
-        w = np.array(log_ml)
-        w = np.exp(w - w.max()); w /= w.sum()
-        gap_h = float(np.dot(w, preds))
-        return float(self._tau.iloc[-1] + gap_h)
+        w = np.array(log_ml); w = np.exp(w - w.max()); w /= w.sum()
+        return float(self._tau.iloc[-1] + float(np.dot(w, preds)))
 
 
 class FAVARLargeDS(_LargeDSBase):
