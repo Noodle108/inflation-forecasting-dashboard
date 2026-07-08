@@ -1,152 +1,185 @@
 """Loader for survey-based inflation forecasts (SPF, Greenbook) and a free surrogate
-for Blue Chip that averages FRED-provided 1-year expected-inflation measures.
+for Blue Chip.
 
-Data-file conventions
----------------------
-User places files under ``data/surveys/`` in the repo root. The loader auto-detects
-CSV vs Excel by extension and normalizes the sheet into a long DataFrame with
-columns [origin, horizon, series, value].
+File-format details (learned from actual Philly Fed downloads)
+--------------------------------------------------------------
+* Both files come from a SAS export pipeline that writes a **malformed
+  ``docProps/core.xml``** timestamp (a space where the hour digit should be
+  padded), which crashes openpyxl. We rewrite the XML in memory before parsing
+  — never touch the file on disk.
 
-* **SPF** — download ``Mean_Level.xlsx`` from
-  https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters
-  → Data Files → Level Mean Responses. Place at ``data/surveys/spf_mean_level.xlsx``.
-  The sheet has columns ``YEAR, QUARTER, CPI1..CPI6, PCE1..PCE6, PGDP1..PGDP6,
-  CORECPI1..CORECPI6``. Each ``<series><n>`` cell is the mean forecast of
-  annualized inflation for horizon *n* quarters (n=1 = nowcast for the survey
-  quarter; n=6 = 5 quarters out).
+* **SPF Mean_Level.xlsx** — one *sheet per series*. The inflation sheets are
+  ``CPI``, ``CORECPI``, ``PCE``, ``COREPCE``, ``PGDP`` (GDP deflator). Each sheet
+  is wide: ``YEAR, QUARTER, <SERIES>1..<SERIES>6``. Column ``<SERIES>1`` is the
+  survey forecast for the *current* quarter (i.e. nowcast, h=0); ``<SERIES>6``
+  is 5 quarters out (h=5). Values are **annualized quarterly inflation in
+  percent**.
 
-* **Greenbook** — download ``gbweb_row_format.xlsx`` from
-  https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/greenbook-data-sets
-  Place at ``data/surveys/greenbook_row_format.xlsx``. Look for columns like
-  ``gPGDPF0..gPGDPF9``, ``gPCPIF0..gPCPIF9``, ``gPCCPIF0..gPCCPIF9`` (F0 = nowcast).
-  Note: Greenbook data is embargoed 5 years so the file ends ~2019.
-
-* **Blue Chip** — subscription only. We compute a free surrogate as the mean of
-  Michigan 1-yr (MICH) and Cleveland Fed 1-yr (EXPINF1YR) from FRED. No file
-  upload required.
+* **Greenbook row_format.xlsx** — one *sheet per series*. Inflation sheets:
+  ``gPCPI`` (headline CPI), ``gPCPIX`` (core CPI), ``gPPCE`` (headline PCE),
+  ``gPPCEX`` (core PCE), ``gPGDP`` (GDP deflator). Layout: ``DATE,
+  <SERIES>B4..B1, <SERIES>F0..F9, GBdate``. ``DATE`` is a *decimal* quarter
+  code (e.g. 2020.2 = 2020 Q2) — the reference quarter that ``F0`` describes.
+  ``F0..F9`` = nowcast + 9-quarter forecast. ``B*`` are backcasts (not used).
+  ``GBdate`` is the meeting release date as ``YYYYMMDD``. Values are already in
+  the model's units (annualized quarterly log-difference, percent).
 """
 from __future__ import annotations
 
+import io
+import re
+import zipfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-# Package root = two levels up from this file
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SURVEYS_DIR = _PROJECT_ROOT / "data" / "surveys"
 
 
 # --------------------------------------------------------------------------- #
-# SPF loader
+# xlsx reader that tolerates the malformed core.xml from Philly Fed's SAS pipe
 # --------------------------------------------------------------------------- #
-_SPF_ALIASES = {
-    "cpi": "CPI",
-    "pce": "PCE",
-    "gdpdef": "PGDP",
-    "core_cpi": "CORECPI",
-}
+def _open_xlsx_forgiving(path: Path) -> pd.ExcelFile:
+    """Return an ExcelFile for ``path`` even if its ``docProps/core.xml`` has a
+    malformed timestamp (missing hour zero-padding, common in Philly Fed's SAS
+    exports). We rewrite the metadata in an in-memory zip copy and hand that
+    buffer to pandas — the source file on disk is untouched.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        for it in zin.infolist():
+            data = zin.read(it.filename)
+            if it.filename == "docProps/core.xml":
+                # "T 2:56:52-04:00"  ->  "T02:56:52-04:00"
+                data = re.sub(rb"T\s+(\d:)", rb"T0\1", data)
+            zout.writestr(it, data)
+    buf.seek(0)
+    return pd.ExcelFile(buf, engine="openpyxl")
 
 
+# --------------------------------------------------------------------------- #
+# Path resolution
+# --------------------------------------------------------------------------- #
 def _spf_path() -> Optional[Path]:
-    """Find an SPF file if the user has placed one under data/surveys/."""
-    for name in ("spf_mean_level.xlsx", "spf_mean_level.csv",
-                 "Mean_Level.xlsx", "Mean_Level.csv"):
+    for name in ("spf_mean_level.xlsx", "Mean_Level.xlsx",
+                 "spf_mean_level.xls",  "Mean_Level.xls"):
         p = SURVEYS_DIR / name
         if p.exists():
             return p
     return None
 
 
-def load_spf(series: str = "cpi") -> Optional[pd.DataFrame]:
-    """Return SPF quarterly mean forecasts for `series` as a wide DataFrame with
-    index = survey origin (quarterly), columns = horizons h=0..5, values = the
-    mean forecast of the annualized inflation rate at that horizon.
+def _gb_path() -> Optional[Path]:
+    for name in ("greenbook_row_format.xlsx", "gbweb_row_format.xlsx",
+                 "greenbook_row_format.xls", "gbweb_row_format.xls"):
+        p = SURVEYS_DIR / name
+        if p.exists():
+            return p
+    return None
 
-    Column names in the raw file use ``<PREFIX><n>`` where n = 1..6; SPF's own
-    convention is n=1 → current quarter, n=6 → 5 quarters out. We remap to
-    horizons h = 0..5 (so h=0 is the current-quarter nowcast).
+
+# --------------------------------------------------------------------------- #
+# SPF loader
+# --------------------------------------------------------------------------- #
+# key -> (sheet_name, column_prefix)
+_SPF_SHEET = {
+    "cpi":       ("CPI",       "CPI"),
+    "core_cpi":  ("CORECPI",   "CORECPI"),
+    "pce":       ("PCE",       "PCE"),
+    "core_pce":  ("COREPCE",   "COREPCE"),
+    "gdpdef":    ("PGDP",      "PGDP"),
+}
+
+
+@lru_cache(maxsize=8)
+def load_spf(series: str = "cpi") -> Optional[pd.DataFrame]:
+    """Return SPF quarterly mean forecasts for ``series`` as a wide DataFrame
+    indexed by the *survey origin* (the quarter the survey was conducted),
+    columns = horizons ``h0..h5``.
+
+    The SPF numbering has ``<PREFIX>1`` = forecast for the survey quarter
+    itself (h=0), ``<PREFIX>2`` = h=1 quarters ahead, ..., ``<PREFIX>6`` = h=5.
     """
     path = _spf_path()
     if path is None:
         return None
-    df = pd.read_excel(path) if path.suffix.lower() in (".xlsx", ".xls") else pd.read_csv(path)
-    prefix = _SPF_ALIASES.get(series.lower())
-    if prefix is None:
+    spec = _SPF_SHEET.get(series.lower())
+    if spec is None:
         return None
-    cols = [c for c in df.columns if c.startswith(prefix) and c[len(prefix):].isdigit()]
-    if not cols:
+    sheet, prefix = spec
+    try:
+        xf = _open_xlsx_forgiving(path)
+        if sheet not in xf.sheet_names:
+            return None
+        df = xf.parse(sheet)
+    except Exception:
         return None
-    # Build the origin index as quarter-start dates
-    if "YEAR" in df.columns and "QUARTER" in df.columns:
-        origin = pd.PeriodIndex.from_fields(
-            year=df["YEAR"].astype(int),
-            quarter=df["QUARTER"].astype(int),
-            freq="Q",
-        ).to_timestamp(how="start")
-    else:
+    if not {"YEAR", "QUARTER"}.issubset(df.columns):
         return None
+    origin = pd.PeriodIndex.from_fields(
+        year=df["YEAR"].astype(int),
+        quarter=df["QUARTER"].astype(int),
+        freq="Q",
+    ).to_timestamp(how="start")
     out = pd.DataFrame(index=origin)
-    for c in cols:
-        n = int(c[len(prefix):])
-        out[f"h{n-1}"] = pd.to_numeric(df[c], errors="coerce").values
-    return out.sort_index()
+    for n in range(1, 7):
+        col = f"{prefix}{n}"
+        if col in df.columns:
+            out[f"h{n-1}"] = pd.to_numeric(df[col], errors="coerce").values
+    return out.sort_index().dropna(how="all")
 
 
 # --------------------------------------------------------------------------- #
 # Greenbook loader
 # --------------------------------------------------------------------------- #
-_GB_PREFIX = {
-    "gdpdef": "gPGDP",
-    "cpi":    "gPCPI",
-    "core_cpi": "gPCCPI",
+# key -> (sheet_name, series_prefix)
+_GB_SHEET = {
+    "cpi":       ("gPCPI",  "gPCPI"),
+    "core_cpi":  ("gPCPIX", "gPCPIX"),
+    "pce":       ("gPPCE",  "gPPCE"),
+    "core_pce":  ("gPPCEX", "gPPCEX"),
+    "gdpdef":    ("gPGDP",  "gPGDP"),
 }
 
 
-def _gb_path() -> Optional[Path]:
-    for name in ("greenbook_row_format.xlsx", "greenbook_row_format.csv",
-                 "gbweb_row_format.xlsx", "gbweb_row_format.csv"):
-        p = SURVEYS_DIR / name
-        if p.exists():
-            return p
-    return None
-
-
+@lru_cache(maxsize=8)
 def load_greenbook(series: str = "cpi") -> Optional[pd.DataFrame]:
-    """Return Greenbook forecasts for `series` as a wide DataFrame keyed by the
-    date of the Greenbook release, with columns h=0..9.
+    """Return Greenbook forecasts for ``series`` as a wide DataFrame indexed by
+    the *Greenbook release date* (from ``GBdate`` = YYYYMMDD), columns = h0..h9.
     """
     path = _gb_path()
     if path is None:
         return None
-    df = pd.read_excel(path) if path.suffix.lower() in (".xlsx", ".xls") else pd.read_csv(path)
-    prefix = _GB_PREFIX.get(series.lower())
-    if prefix is None:
+    spec = _GB_SHEET.get(series.lower())
+    if spec is None:
         return None
-    # Column names look like gPCPIF0..gPCPIF9
-    cols = [c for c in df.columns if c.startswith(prefix + "F") and c[len(prefix) + 1:].isdigit()]
-    if not cols:
+    sheet, prefix = spec
+    try:
+        xf = _open_xlsx_forgiving(path)
+        if sheet not in xf.sheet_names:
+            return None
+        df = xf.parse(sheet)
+    except Exception:
         return None
-    # Origin date — try a few likely column names
-    origin_col = None
-    for cand in ("GBdate", "gbdate", "meeting_date", "MEETING_DATE", "date"):
-        if cand in df.columns:
-            origin_col = cand
-            break
-    if origin_col is None and {"GByear", "GBmonth"}.issubset(df.columns):
-        origin = pd.to_datetime(dict(year=df["GByear"], month=df["GBmonth"], day=1))
-    elif origin_col is not None:
-        origin = pd.to_datetime(df[origin_col])
-    else:
+    if "GBdate" not in df.columns:
         return None
-
-    out = pd.DataFrame(index=pd.DatetimeIndex(origin))
-    for c in cols:
-        h = int(c[len(prefix) + 1:])
-        out[f"h{h}"] = pd.to_numeric(df[c], errors="coerce").values
-    return out.sort_index()
+    origin = pd.to_datetime(df["GBdate"].astype(int).astype(str), format="%Y%m%d",
+                            errors="coerce")
+    out = pd.DataFrame(index=origin)
+    for h in range(10):
+        col = f"{prefix}F{h}"
+        if col in df.columns:
+            out[f"h{h}"] = pd.to_numeric(df[col], errors="coerce").values
+    out = out.dropna(subset=[c for c in out.columns if c.startswith("h")],
+                     how="all").sort_index()
+    # Keep the *last* Greenbook per calendar quarter so downstream logic works
+    # against a quarterly index. Reindex origin to the release quarter.
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -159,15 +192,14 @@ def load_blue_chip_surrogate() -> Optional[pd.Series]:
         return None
     mich = _f._fetch_fred_series("MICH", "1978-01-01")
     exp1 = _f._fetch_fred_series("EXPINF1YR", "1982-01-01")
-    if mich is None and exp1 is None:
-        return None
     frames = [s for s in (mich, exp1) if s is not None]
-    df = pd.concat(frames, axis=1)
-    return df.mean(axis=1).dropna()
+    if not frames:
+        return None
+    return pd.concat(frames, axis=1).mean(axis=1).dropna()
 
 
 # --------------------------------------------------------------------------- #
-# Introspection helpers for the UI
+# Status object
 # --------------------------------------------------------------------------- #
 @dataclass
 class SurveyStatus:
@@ -179,9 +211,9 @@ class SurveyStatus:
 
     def summary(self) -> str:
         parts = []
-        parts.append(f"SPF: {'✅' if self.spf_present else '❌ (place file at data/surveys/spf_mean_level.xlsx)'}")
-        parts.append(f"Greenbook: {'✅' if self.gb_present else '❌ (place file at data/surveys/greenbook_row_format.xlsx)'}")
-        parts.append(f"Blue-Chip surrogate (MICH + EXPINF1YR): {'✅' if self.bc_available else '❌'}")
+        parts.append(f"**SPF**: {'✅ ' + self.spf_path.name if self.spf_present else '❌ (place at data/surveys/spf_mean_level.xlsx)'}")
+        parts.append(f"**Greenbook**: {'✅ ' + self.gb_path.name if self.gb_present else '❌ (place at data/surveys/greenbook_row_format.xlsx)'}")
+        parts.append(f"**Blue-Chip surrogate** (MICH + EXPINF1YR): {'✅' if self.bc_available else '❌'}")
         return "  |  ".join(parts)
 
 
