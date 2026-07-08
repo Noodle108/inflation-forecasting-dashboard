@@ -495,10 +495,29 @@ Repeat across many origins and score the resulting forecast errors.
             lb = res.leaderboard().copy()
             lb.index = [infos[k].name for k in lb.index]
             st.subheader("Leaderboard")
+
+            def _rel_rmse_color(v: float) -> str:
+                """Green when the model beats the benchmark (rel_rmse < 1), red
+                when worse; anchored at 1 = white. Matplotlib-free so the app
+                doesn't need matplotlib in requirements.txt."""
+                if pd.isna(v):
+                    return ""
+                # clamp to [0.5, 1.5] for the gradient; center at 1.0
+                x = max(0.5, min(1.5, float(v)))
+                if x <= 1.0:
+                    # green -> white as x goes 0.5 -> 1.0
+                    t = (x - 0.5) / 0.5
+                    r = int(200 + t * 55); g = int(240); b = int(200 + t * 55)
+                else:
+                    # white -> red as x goes 1.0 -> 1.5
+                    t = (x - 1.0) / 0.5
+                    r = int(255); g = int(240 - t * 100); b = int(255 - t * 155)
+                return f"background-color: rgba({r},{g},{b},0.55);"
+
             st.dataframe(
                 lb.style.format({"rmse": "{:.3f}", "mae": "{:.3f}",
                                  "rel_rmse": "{:.3f}", "n": "{:.0f}"})
-                        .background_gradient(subset=["rel_rmse"], cmap="RdYlGn_r"),
+                        .map(_rel_rmse_color, subset=["rel_rmse"]),
                 use_container_width=True,
             )
 
