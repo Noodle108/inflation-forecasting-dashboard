@@ -29,8 +29,22 @@ if not os.environ.get("FRED_API_KEY"):
 
 from src.data import fred
 from src.evaluation.backtest import run_backtest
+from src.evaluation.fw_horserace import run_fw_horserace
 from src.models import registry
 from src.models.model_extras import EXTRAS as _MODEL_EXTRAS
+
+# Import the FW constants defensively: on Streamlit Cloud a stale-bytecode of
+# registry.py from an earlier deploy can lack these names. If the import fails,
+# fall back to the current values so the FW tab still renders.
+try:
+    from src.models.registry import FW_BENCHMARK_KEY, FW_TABLE_KEYS
+except ImportError:
+    FW_BENCHMARK_KEY = "fw_fixedrho"
+    FW_TABLE_KEYS = [
+        "fw_direct", "fw_rar", "fw_pc", "rw", "ao", "ucsv",
+        "fw_argap", "fw_pcgap", "fw_pctvngap", "fw_tsvar", "tvpvar",
+        "fw_ewa", "fw_bma", "fw_favar", "sw07", "fw_dsgegap", "fw_fixedrho",
+    ]
 
 
 def model_extras(key: str) -> dict:
@@ -565,10 +579,8 @@ Repeat across many origins and score the resulting forecast errors.
 
 # --------------------------------------------------------------------------- #
 # Tab 3 — Faust–Wright horse race
+# (imports at top of file, with an ImportError fallback for stale caches)
 # --------------------------------------------------------------------------- #
-from src.evaluation.fw_horserace import run_fw_horserace
-from src.models.registry import FW_BENCHMARK_KEY, FW_TABLE_KEYS
-
 with tab_fw:
     st.markdown("### Faust–Wright (2013) horse race")
     st.markdown(
@@ -632,6 +644,13 @@ the *frontier* of forecast accuracy — are not on FRED and are omitted.
                                help="Bigger step = fewer origins = faster run.")
 
     fw_all_keys = [k for k in FW_TABLE_KEYS if k in infos]
+    missing_fw = [k for k in FW_TABLE_KEYS if k not in infos]
+    if missing_fw:
+        st.warning(
+            f"{len(missing_fw)} FW model(s) not yet in the running registry: "
+            f"`{'`, `'.join(missing_fw)}`. This usually means the deploy is on a "
+            "stale build — hit **Manage app → Reboot** on Streamlit Cloud to reload."
+        )
     default_selected = [k for k in fw_all_keys
                         if k not in ("sw07", "fw_dsgegap", "tvpvar", "fw_ewa")]
     fw_selected = st.multiselect(
