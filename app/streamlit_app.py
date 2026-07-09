@@ -377,33 +377,40 @@ def _collect_customization(chosen_keys: list[str]) -> dict[str, dict]:
 
 
 # Render the customization expander if any selected model has knobs.
+# Each model has its OWN "Apply" toggle so you can tweak one model without
+# affecting the others — the sliders inside are ignored unless that model's
+# toggle is on.
 _customizable = [k for k in chosen if k in CUSTOM_SPEC]
+_apply_flags: dict[str, bool] = {}
 if _customizable:
     st.sidebar.markdown("### ⚙️ Customize model assumptions")
     st.sidebar.caption(
-        "Override calibrated parameters for the selected structural models. "
-        "Values persist across reruns."
-    )
-    # Enable/disable customization globally, so a user can quickly A/B against defaults.
-    _cust_on = st.sidebar.toggle(
-        "Apply customization", value=st.session_state.get("cust_on", False),
-        key="cust_on",
-        help="When off, sliders below are ignored and models use their default "
-             "calibrations.",
+        "Override calibrated parameters for each selected structural model "
+        "independently. Each model has its own Apply toggle."
     )
     for k in _customizable:
         info = infos[k]
-        color = COLORS.get(info.family, COLORS["muted"])
-        with st.sidebar.expander(f"{info.name}"):
+        apply_key = f"cust_apply_{k}"
+        # Show a green dot next to the model name when its customization is on.
+        applied_now = st.session_state.get(apply_key, False)
+        header = f"🟢 {info.name}" if applied_now else info.name
+        with st.sidebar.expander(header):
+            apply_it = st.checkbox(
+                f"Apply custom values for {info.name}",
+                value=applied_now,
+                key=apply_key,
+                help="When off, this model uses its default (paper) calibration "
+                     "regardless of the slider values below.",
+            )
+            _apply_flags[k] = apply_it
             for kw, label, lo, hi, default, step, help_text in CUSTOM_SPEC[k]:
                 skey = _slider_key(k, kw)
                 # Initial value: user's previous choice, else the model default,
-                # else the midpoint (for anchor overrides where default is None).
+                # else a sensible midpoint (for anchor overrides where default is None).
                 if default is None:
-                    init = st.session_state.get(skey, 2.5)   # sensible anchor start
+                    init = st.session_state.get(skey, 2.5)
                 else:
                     init = st.session_state.get(skey, default)
-                # Use int slider for integer-typed parameters (BB n_lags).
                 if isinstance(default, int):
                     st.slider(label, int(lo), int(hi), int(init), int(step),
                               key=skey, help=help_text)
@@ -417,11 +424,11 @@ if _customizable:
                         default if default is not None else 2.5
                     )
                 st.rerun()
-else:
-    _cust_on = False
 
-# Collect the final customization dict — used at fit-time to key the cache.
-_custom_hp = _collect_customization(chosen) if _cust_on else {}
+# Collect the final customization dict — only include models whose Apply
+# toggle is on.
+_full_custom = _collect_customization(chosen)
+_custom_hp = {k: v for k, v in _full_custom.items() if _apply_flags.get(k, False)}
 
 
 def model_hp_json(key: str) -> str:
