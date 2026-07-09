@@ -83,6 +83,9 @@ class ClevelandExpectations(ForecastModel):
             raise RuntimeError("Cleveland expectations: empty term structure at as-of date.")
         self._curve = curve
         self._latest = curve.iloc[-1].dropna()
+        # Latest realized inflation — used as the h=0 anchor when interpolating
+        # sub-1yr horizons (the Cleveland Fed's shortest series is 1yr).
+        self._last_realized = float(self._y.iloc[-1])
         # Determine periods-per-year from the training frequency
         is_quarterly = bool(self._y.index.freqstr and self._y.index.freqstr.startswith("Q"))
         self._ppy = 4 if is_quarterly else 12
@@ -90,11 +93,24 @@ class ClevelandExpectations(ForecastModel):
     def _forecast(self, h: int) -> float:
         # h is in *periods*; convert to years (fractional allowed).
         tau_h = max(h / self._ppy, 1e-3)
-        # Interpolate the term structure at tau_h. Cleveland Fed publishes maturities
-        # 1..30y; below 1y or above 30y we clamp to the boundary.
         taus = np.asarray(self._latest.index, dtype=float)
         vals = self._latest.values.astype(float)
         order = np.argsort(taus)
         taus, vals = taus[order], vals[order]
-        tau_h = float(np.clip(tau_h, taus[0], taus[-1]))
+        # Below 1yr: the Cleveland Fed doesn't publish a shorter maturity, so
+        # linearly interpolate between the *current realized print* (h=0 anchor)
+        # and the 1-year expected value. This turns the flat sub-1yr region into
+        # a visible glide from where inflation is now toward the 1yr expectation.
+        if tau_h < taus[0]:
+            w = tau_h / taus[0]                       # 0 at h=0, 1 at 1yr
+            return float((1 - w) * self._last_realized + w * vals[0])
+        # Above the longest published maturity: clamp (avoids extrapolation).
+        if tau_h > taus[-1]:
+            return float(vals[-1])
         return float(np.interp(tau_h, taus, vals))
+
+    def steady_state(self) -> float:
+        """Long-run inflation anchor = the longest-maturity expectation available."""
+        vals = self._latest.values.astype(float)
+        taus = np.asarray(self._latest.index, dtype=float)
+        return float(vals[np.argmax(taus)])
