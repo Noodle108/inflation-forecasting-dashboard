@@ -187,13 +187,69 @@ infl_key = st.sidebar.selectbox(
 )
 
 infos = {i.key: i for i in registry.all_infos()}
-default_models = [k for k in ["rw", "ao", "ar", "ucsv", "dsge"] if k in infos]
-chosen = st.sidebar.multiselect(
-    "Models to compare",
-    options=list(infos.keys()),
-    default=default_models,
-    format_func=lambda k: f"{infos[k].name}",
-)
+
+# Group models by family for the sidebar picker. Order the families the way
+# we visualize them (grey → blue → red) and sort within each family so the
+# most-canonical models appear first.
+_FAMILY_ORDER = ["Benchmark", "Statistical", "Structural"]
+# Color-coded circles matching the chart palette: grey / blue / red.
+_FAMILY_EMOJI = {"Benchmark": "⚪", "Statistical": "🔵", "Structural": "🔴"}
+_by_family: dict[str, list[str]] = {f: [] for f in _FAMILY_ORDER}
+for k, i in infos.items():
+    _by_family.setdefault(i.family, []).append(k)
+# Hide FW-only variants and survey benchmarks from the main sidebar (they're
+# accessed via the Faust–Wright tab instead) to keep this list focused.
+_HIDE_FROM_SIDEBAR = {k for k in infos
+                      if k.startswith("fw_") or k in ("spf", "gb", "bc")}
+
+# Default picks — one canonical benchmark, one univariate stat model, one structural.
+_default_models = [k for k in ["rw", "ao", "ar", "ucsv", "dsge"] if k in infos]
+
+# Persist selection across reruns.
+if "chosen_models" not in st.session_state:
+    st.session_state["chosen_models"] = list(_default_models)
+
+# Presets — one click bulk-selects a coherent set.
+st.sidebar.markdown("### Models to compare")
+_p_cols = st.sidebar.columns(3)
+if _p_cols[0].button("Basic", help="RW, AO, AR — the classic 3-model benchmark",
+                     use_container_width=True):
+    st.session_state["chosen_models"] = [k for k in ["rw", "ao", "ar"] if k in infos]
+if _p_cols[1].button("Recommended",
+                     help="Balanced mix across the three families",
+                     use_container_width=True):
+    st.session_state["chosen_models"] = [k for k in
+                                          ["rw", "ao", "ucsv", "ar", "nkpc",
+                                           "tvtnkpc", "dsge", "bb"]
+                                          if k in infos]
+if _p_cols[2].button("Clear", help="Uncheck everything", use_container_width=True):
+    st.session_state["chosen_models"] = []
+
+# Family-grouped checkboxes. Each family is a collapsible expander so the
+# sidebar isn't a wall of 15 items.
+_current = set(st.session_state["chosen_models"])
+for fam in _FAMILY_ORDER:
+    fam_keys = [k for k in _by_family.get(fam, []) if k not in _HIDE_FROM_SIDEBAR]
+    if not fam_keys:
+        continue
+    fam_count = sum(1 for k in fam_keys if k in _current)
+    with st.sidebar.expander(
+        f"{_FAMILY_EMOJI.get(fam, '')} **{fam}** ({fam_count}/{len(fam_keys)})",
+        expanded=(fam == "Benchmark"),
+    ):
+        for k in fam_keys:
+            i = infos[k]
+            checked = st.checkbox(
+                i.name, value=(k in _current),
+                key=f"pick_{k}",
+                help=i.reference,
+            )
+            if checked:
+                _current.add(k)
+            else:
+                _current.discard(k)
+st.session_state["chosen_models"] = [k for k in infos if k in _current]
+chosen = st.session_state["chosen_models"]
 
 horizon = st.sidebar.slider("Forecast horizon (periods ahead)", 1, 24,
                             12 if freq == "M" else 4)
@@ -217,8 +273,8 @@ X = data.activity if not data.activity.empty else None
 step = pd.DateOffset(months=1 if freq == "M" else 3)
 
 tab_overview, tab_eval, tab_fw, tab_models = st.tabs(
-    ["📊 Data & Forecasts", "🏆 Evaluation",
-     "🐎 Faust–Wright", "📚 Model Library"]
+    ["📊 Data & Forecasts", "🎯 Evaluation",
+     "🥇 Faust–Wright", "📚 Model Library"]
 )
 
 # --------------------------------------------------------------------------- #
@@ -244,22 +300,23 @@ with tab_overview:
 
     # Range-preset UI + a special "Zoom" preset that focuses only on the
     # forecast band with a tight y-axis, so many-model comparisons are readable.
-    # 'zoom' is treated as a special sentinel value in the state.
-    RANGES = [("Zoom", "zoom"), ("1Y", 1), ("2Y", 2), ("3Y", 3), ("5Y", 5),
-              ("10Y", 10), ("20Y", 20), ("All", None)]
-    if "range_years" not in st.session_state:
-        st.session_state["range_years"] = 5    # sensible default
+    # Uses st.pills which auto-wraps and never truncates labels — solves the
+    # 'Zoom' cut-off-at-the-m problem that narrow columns had.
+    RANGE_LABELS = ["🔍 Zoom", "1Y", "2Y", "3Y", "5Y", "10Y", "20Y", "All"]
+    RANGE_VALUES = {"🔍 Zoom": "zoom", "1Y": 1, "2Y": 2, "3Y": 3, "5Y": 5,
+                    "10Y": 10, "20Y": 20, "All": None}
 
-    r_cols = st.columns([1] * len(RANGES) + [4, 3])
-    for (label, yrs), col in zip(RANGES, r_cols[:-2]):
-        active = st.session_state["range_years"] == yrs
-        if col.button(label, key=f"rng_{label}",
-                      use_container_width=True,
-                      type=("primary" if active else "secondary")):
-            st.session_state["range_years"] = yrs
-
-    # Legend-position toggle — helps a lot when there are 8+ models.
-    with r_cols[-2]:
+    r_left, r_right = st.columns([3, 1])
+    with r_left:
+        picked_label = st.pills(
+            "Range",
+            RANGE_LABELS,
+            default="5Y",
+            selection_mode="single",
+            key="range_pill",
+            label_visibility="collapsed",
+        ) or "5Y"
+    with r_right:
         legend_mode = st.selectbox(
             "Labels",
             ["Inline (right)", "Legend (top)", "Off"],
@@ -267,11 +324,8 @@ with tab_overview:
             key="legend_mode",
             label_visibility="collapsed",
         )
-    with r_cols[-1]:
-        # A convenience note replaced the old caption-below-chart
-        st.caption(f"{len(chosen)} model{'s' if len(chosen) != 1 else ''} selected")
 
-    yrs = st.session_state["range_years"]
+    yrs = RANGE_VALUES[picked_label]
     zoom_mode = (yrs == "zoom")
 
     # Fit models first — we need the forecast values to compute the zoom range.
@@ -726,7 +780,7 @@ with tab_fw:
     # ================================================================= #
     # Header — one sentence of context, one row of stat tiles.
     # ================================================================= #
-    st.markdown("## 🐎 Faust–Wright horse race")
+    st.markdown("## 🥇 Faust–Wright horse race")
     st.caption(
         "Reproduces Faust & Wright's *Forecasting Inflation* (2013) Table 1.2: "
         "compare 20 inflation-forecasting methods, scored by RMSPE relative to their "
