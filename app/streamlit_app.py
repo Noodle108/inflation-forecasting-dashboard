@@ -418,12 +418,18 @@ if _customizable:
                     st.slider(label, float(lo), float(hi), float(init),
                               float(step), key=skey, help=help_text)
             # Reset button — sets every slot for this model back to its default.
-            if st.button(f"Reset {info.name} to defaults", key=f"reset_{k}"):
-                for kw, _l, _lo, _hi, default, _s, _h in CUSTOM_SPEC[k]:
-                    st.session_state[_slider_key(k, kw)] = (
+            # Uses an on_click callback (fires BEFORE the sliders re-render on
+            # the next run), so we're allowed to write the widget-owned keys.
+            # Writing them after render inside an `if st.button:` block raises
+            # StreamlitAPIException "cannot be modified after the widget was
+            # instantiated".
+            def _reset_model(model_key=k):
+                for kw, _l, _lo, _hi, default, _s, _h in CUSTOM_SPEC[model_key]:
+                    st.session_state[_slider_key(model_key, kw)] = (
                         default if default is not None else 2.5
                     )
-                st.rerun()
+            st.button(f"Reset {info.name} to defaults", key=f"reset_{k}",
+                      on_click=_reset_model)
 
 # Collect the final customization dict — only include models whose Apply
 # toggle is on.
