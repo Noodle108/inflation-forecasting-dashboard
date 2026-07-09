@@ -582,136 +582,182 @@ Repeat across many origins and score the resulting forecast errors.
 # (imports at top of file, with an ImportError fallback for stale caches)
 # --------------------------------------------------------------------------- #
 with tab_fw:
-    st.markdown("### Faust–Wright (2013) horse race")
-    st.markdown(
-        """
-Faust & Wright's chapter *Forecasting Inflation* (Handbook of Economic Forecasting,
-vol. 2A, ch. 1) runs a comprehensive horse race of inflation-forecasting methods.
-Their headline object is **Table 1.2**: for each model and each horizon
-h = 0, 1, 2, 3, 4, 8 quarters, they report RMSPE relative to a stern benchmark —
-an AR(1) in gap form with ρ pinned to 0.46, hand-picked from a 1985-vintage
-GDP-deflator fit. **rel_RMSPE < 1 means the model beats the benchmark.**
-
-This tab rebuilds their exercise on FRED data, augmented (when available) with
-the three subjective survey forecasts they identify as the frontier of
-forecast accuracy: SPF, Greenbook, and a free Blue-Chip surrogate.
-        """
-    )
-
-    # --- Survey-data status ---
     from src.data.surveys import survey_status
     _sstatus = survey_status()
-    with st.expander("📥 Survey-forecast data status", expanded=(not _sstatus.spf_present or not _sstatus.gb_present)):
-        st.markdown(_sstatus.summary())
-        st.markdown(
-            """
-**How to add SPF and Greenbook data** (both are free, public downloads from
-the Philadelphia Fed):
 
-1. **SPF** — go to
-   [Philly Fed SPF Mean Responses](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters)
-   → *Data Files* → **Level Mean Responses**. Download the CPI file (or any
-   inflation measure you want). Save the .xlsx as
-   `data/surveys/spf_mean_level.xlsx` in the repo.
+    # ================================================================= #
+    # Header — one sentence of context, one row of stat tiles.
+    # ================================================================= #
+    st.markdown("## 🐎 Faust–Wright horse race")
+    st.caption(
+        "Reproduces Faust & Wright's *Forecasting Inflation* (2013) Table 1.2: "
+        "compare 20 inflation-forecasting methods, scored by RMSPE relative to their "
+        "'fixed ρ = 0.46 AR(1) gap' benchmark. **Below 1.00 = beats the benchmark.**"
+    )
 
-2. **Greenbook** — go to
-   [Philly Fed Greenbook Data Sets](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/greenbook-data-sets)
-   and download the *Row Format* file. Save as
-   `data/surveys/greenbook_row_format.xlsx`. Note the 5-year public embargo.
+    fw_all_keys = [k for k in FW_TABLE_KEYS if k in infos]
+    missing_fw = [k for k in FW_TABLE_KEYS if k not in infos]
+    _bench_ok = FW_BENCHMARK_KEY in fw_all_keys
 
-3. **Blue Chip** — subscription-only from Wolters Kluwer. This app ships a
-   **free surrogate**: the average of Michigan Survey 1-yr (MICH) and Cleveland
-   Fed 1-yr (EXPINF1YR) from FRED. No file upload needed.
+    # Compact status strip
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("Models available",
+              f"{len(fw_all_keys)}",
+              help="Total FW Table 1.2 rows in this deploy.")
+    survey_count = sum(int(x) for x in (_sstatus.spf_present, _sstatus.gb_present,
+                                        _sstatus.bc_available))
+    t2.metric("Survey benchmarks", f"{survey_count} / 3",
+              help="SPF, Greenbook, Blue-Chip surrogate. FW show these dominate models.")
+    t3.metric("Benchmark",
+              "Fixed ρ AR(1)" if _bench_ok else "⚠️ missing",
+              help="rel_RMSPE divisor for every model.")
+    t4.metric("Detected CPUs", f"{max(1, (os.cpu_count() or 2))}",
+              help="Used for parallel origin distribution.")
 
-After adding files, redeploy on Streamlit Cloud (or restart locally) — the
-loader auto-detects the files and the survey rows appear in the horse race.
-            """
+    if missing_fw:
+        st.warning(
+            f"{len(missing_fw)} FW model(s) not yet in the registry: "
+            f"`{'`, `'.join(missing_fw)}`. **Reboot** on Streamlit Cloud to reload."
         )
 
-    with st.expander("Models included (Faust–Wright Table 1.2 rows)"):
-        rows = []
-        for k in FW_TABLE_KEYS:
-            i = infos.get(k)
-            if i is None:
-                continue
-            rows.append({"Table 1.2 row": i.reference.split("—")[-1].strip()
-                                          if "—" in i.reference else i.reference,
-                         "Model": i.name, "Family": i.family})
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        st.caption(
-            "Omitted rows: Blue-Chip / SPF / Greenbook subjective forecasts (survey "
-            "data not on FRED). Faust–Wright find these are the best forecasters — "
-            "they are the frontier every model is trying to reach."
-        )
+    # ================================================================= #
+    # About / help — collapsed by default.
+    # ================================================================= #
+    with st.expander("ℹ️ About this exercise & data-file status", expanded=False):
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            st.markdown(
+                """
+**What the horse race does.** For each origin date *t* between 1980 and today,
+each model is re-fit using only data up to *t*, then forecasts inflation
+*h* quarters ahead. That forecast is compared against the actual inflation
+observed *h* quarters later. Repeat across many origins, take the RMSPE.
 
-    st.markdown("#### Configuration")
-    fw_c1, fw_c2, fw_c3 = st.columns([2, 2, 2])
-    with fw_c1:
+**What Faust & Wright found:**
+- **Subjective survey forecasts** (SPF, Greenbook, Blue-Chip) are the frontier.
+- **Gap-form models** — where inflation is decomposed into a slow-moving trend
+  τ_t plus a stationary "gap" — dominate stationary specifications.
+- The **fixed-ρ AR(1) in gap form** is deceptively hard to beat by more than ~10%.
+                """
+            )
+        with c2:
+            st.markdown("**Survey data status**")
+            st.markdown(_sstatus.summary())
+            if not (_sstatus.spf_present and _sstatus.gb_present):
+                st.caption(
+                    "Missing files? Download from "
+                    "[Philly Fed SPF](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters) "
+                    "and [Greenbook](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/greenbook-data-sets) "
+                    "→ save as `data/surveys/spf_mean_level.xlsx` and "
+                    "`data/surveys/greenbook_row_format.xlsx`."
+                )
+
+    # ================================================================= #
+    # Configuration — presets + collapsible fine-grained controls.
+    # ================================================================= #
+    st.markdown("### 1. Configure the run")
+
+    # Presets keep 90% of users out of the multiselect entirely.
+    PRESETS = {
+        "Quick (fast, ~10-20s)": {
+            "keys": [k for k in fw_all_keys
+                     if k not in ("sw07", "fw_dsgegap", "tvpvar", "fw_ewa", "fw_bma")],
+            "horizons": [0, 1, 4, 8] if freq == "Q" else [0, 1, 6, 12],
+            "step": 4,
+        },
+        "Standard (recommended)": {
+            "keys": [k for k in fw_all_keys if k not in ("sw07", "fw_dsgegap", "tvpvar")],
+            "horizons": [0, 1, 2, 3, 4, 8] if freq == "Q" else [0, 1, 3, 6, 12, 24],
+            "step": 2,
+        },
+        "Full FW replication (slow)": {
+            "keys": list(fw_all_keys),
+            "horizons": [0, 1, 2, 3, 4, 8] if freq == "Q" else [0, 1, 3, 6, 12, 24],
+            "step": 1,
+        },
+    }
+
+    pcol, mcol = st.columns([1, 2])
+    with pcol:
+        preset = st.radio(
+            "Preset", list(PRESETS.keys()),
+            index=1, key="fw_preset",
+            help="A curated bundle of horizons, models, and origin step.",
+        )
+    with mcol:
         fw_infl = st.selectbox(
             "Inflation measure",
             options=list(data.inflation.columns),
             format_func=lambda k: labels.get(k, k),
             key="fw_infl",
         )
-    with fw_c2:
-        default_horizons = [0, 1, 2, 3, 4, 8] if freq == "Q" else [0, 1, 3, 6, 12, 24]
-        fw_horizons = st.multiselect(
-            "Horizons (in periods)",
-            options=list(range(0, 25)),
-            default=default_horizons,
-            help=("FW use quarterly horizons 0..8. On the monthly setting we default to "
-                  "0,1,3,6,12,24 as the direct analogue."),
-        )
-    with fw_c3:
         y_fw = data.series(fw_infl)
-        fw_min_train = st.slider(
-            "Minimum training window",
-            min_value=40, max_value=int(min(400, max(80, len(y_fw) - 30))),
-            value=min(80, len(y_fw) - 30), step=4,
-            key="fw_min_train",
-        )
-        fw_step = st.selectbox("Origin step", [1, 2, 4, 6, 12], index=2, key="fw_step",
-                               help="Bigger step = fewer origins = faster run.")
-        _cpu = max(1, (os.cpu_count() or 2))
-        fw_workers = st.selectbox(
-            "Parallel workers", [1, 2, 4, min(8, _cpu)],
-            index=min(2, len({1, 2, 4, min(8, _cpu)}) - 1),
-            key="fw_workers",
-            help=("Number of processes to distribute the origins across. Bigger "
-                  f"= faster on multi-core machines (detected {_cpu} CPUs)."),
-        )
 
-    fw_all_keys = [k for k in FW_TABLE_KEYS if k in infos]
-    missing_fw = [k for k in FW_TABLE_KEYS if k not in infos]
-    if missing_fw:
-        st.warning(
-            f"{len(missing_fw)} FW model(s) not yet in the running registry: "
-            f"`{'`, `'.join(missing_fw)}`. This usually means the deploy is on a "
-            "stale build — hit **Manage app → Reboot** on Streamlit Cloud to reload."
-        )
-    # Default: skip the slow models. Include surveys that are actually available.
-    _slow = {"sw07", "fw_dsgegap", "tvpvar"}
-    default_selected = [k for k in fw_all_keys if k not in _slow]
-    # Only auto-include SPF/GB if we actually have their data files.
-    if not _sstatus.spf_present and "spf" in default_selected:
-        default_selected.remove("spf")
-    if not _sstatus.gb_present and "gb" in default_selected:
-        default_selected.remove("gb")
-    fw_selected = st.multiselect(
-        "Models to include (uncheck slow ones — SW07, DSGE-GAP, TVP-VAR, EWA — "
-        "if you want a quick run)",
-        options=fw_all_keys, default=default_selected,
-        format_func=lambda k: infos[k].name, key="fw_selected",
-    )
+    _p = PRESETS[preset]
+    with st.expander("Fine-tune (models, horizons, training window, workers)",
+                     expanded=False):
+        # ---- Models grouped by family ----
+        st.markdown("**Models to include**")
+        by_family = {"Benchmark": [], "Statistical": [], "Structural": []}
+        for k in fw_all_keys:
+            by_family.setdefault(infos[k].family, []).append(k)
+        selected = set(_p["keys"])
+        fam_cols = st.columns(len(by_family))
+        for col, fam in zip(fam_cols, ["Benchmark", "Statistical", "Structural"]):
+            with col:
+                st.caption(f"**{fam}** ({len(by_family.get(fam, []))})")
+                for k in by_family.get(fam, []):
+                    default = k in selected
+                    if st.checkbox(infos[k].name, value=default, key=f"fw_pick_{k}"):
+                        selected.add(k)
+                    else:
+                        selected.discard(k)
+        fw_selected = [k for k in fw_all_keys if k in selected]
+
+        st.divider()
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            fw_horizons = st.multiselect(
+                "Horizons (periods)",
+                options=list(range(0, 25)),
+                default=_p["horizons"], key="fw_horizons",
+            )
+        with c2:
+            fw_min_train = st.slider(
+                "Min training window", 40,
+                int(min(400, max(80, len(y_fw) - 30))),
+                value=min(80, len(y_fw) - 30), step=4, key="fw_min_train",
+            )
+        with c3:
+            fw_step = st.selectbox("Origin step", [1, 2, 4, 6, 12],
+                                   index=[1, 2, 4, 6, 12].index(_p["step"]),
+                                   key="fw_step")
+        with c4:
+            _cpu = max(1, (os.cpu_count() or 2))
+            _worker_options = sorted(set([1, 2, 4, min(8, _cpu)]))
+            fw_workers = st.selectbox(
+                "Parallel workers", _worker_options,
+                index=min(len(_worker_options) - 1, 2),
+                key="fw_workers",
+                help=f"Detected {_cpu} CPUs. More workers = faster.",
+            )
 
     n_origins_est = max(0, (len(y_fw) - fw_min_train - max(fw_horizons or [1])) // fw_step + 1)
-    st.caption(
-        f"Plan: **{n_origins_est}** origins × **{len(fw_selected)}** models = "
-        f"~{n_origins_est * len(fw_selected)} model-fits at up to "
-        f"**{len(fw_horizons or [])}** horizons each. FW's exact exercise ran on "
-        f"quarterly data with ~108 origins."
-    )
-    run_fw = st.button("Run Faust–Wright horse race", type="primary", key="run_fw")
+    n_fits = n_origins_est * len(fw_selected)
+
+    # Run bar
+    rc1, rc2 = st.columns([3, 1])
+    with rc1:
+        st.caption(
+            f"**Plan** — {n_origins_est} origins × {len(fw_selected)} models × "
+            f"{len(fw_horizons or [])} horizons = **{n_fits:,} model-fits**. "
+            f"Parallelizing across {fw_workers} worker{'s' if fw_workers != 1 else ''}."
+        )
+    with rc2:
+        run_fw = st.button("▶️ Run horse race", type="primary",
+                           key="run_fw", use_container_width=True)
+
+    st.markdown("### 2. Results")
 
     if run_fw:
         if not fw_selected or not fw_horizons:
@@ -729,82 +775,154 @@ loader auto-detects the files and the survey rows appear in the horse race.
                 progress=lambda p: bar.progress(min(1.0, p), text="Running horse race…"),
             )
             bar.empty()
+            st.session_state["fw_last_result"] = res
+            st.session_state["fw_last_keys"] = keys
 
-            st.markdown(
-                f"#### RMSPE relative to benchmark ({infos[FW_BENCHMARK_KEY].name})"
+    res = st.session_state.get("fw_last_result")
+    keys = st.session_state.get("fw_last_keys") or []
+    if res is None:
+        st.info(
+            "▶️ Configure a run above and click **Run horse race**. "
+            "The **Standard** preset takes ~10–30s on Streamlit Cloud."
+        )
+    else:
+        # -----------------------------------------------------------------
+        # Headline callouts — best/worst at short and long horizons
+        # -----------------------------------------------------------------
+        short_h = res.horizons[1] if len(res.horizons) > 1 else res.horizons[0]
+        long_h = res.horizons[-1]
+        rel = res.rel_rmspe.drop(index=[FW_BENCHMARK_KEY], errors="ignore")
+
+        best_short_key = rel[short_h].idxmin() if short_h in rel.columns else None
+        best_long_key = rel[long_h].idxmin() if long_h in rel.columns else None
+        n_beat_bench = int((rel[long_h] < 1.0).sum()) if long_h in rel.columns else 0
+
+        h1, h2, h3 = st.columns(3)
+        if best_short_key is not None and pd.notna(rel.at[best_short_key, short_h]):
+            h1.metric(
+                f"Best at h={short_h}",
+                infos[best_short_key].name,
+                delta=f"{(rel.at[best_short_key, short_h] - 1) * 100:+.1f}% vs benchmark",
+                delta_color="inverse",
             )
-            # Rename rows to human model names
-            display = res.rel_rmspe.copy()
-            display.index = [infos[k].name for k in display.index]
-            display.columns = [f"h={h}" for h in display.columns]
+        if best_long_key is not None and pd.notna(rel.at[best_long_key, long_h]):
+            h2.metric(
+                f"Best at h={long_h}",
+                infos[best_long_key].name,
+                delta=f"{(rel.at[best_long_key, long_h] - 1) * 100:+.1f}% vs benchmark",
+                delta_color="inverse",
+            )
+        h3.metric(
+            f"Beat benchmark at h={long_h}",
+            f"{n_beat_bench} / {len(rel)}",
+            help="Number of models with rel_RMSPE < 1 at the longest horizon.",
+        )
 
-            def _bg(v):
-                if pd.isna(v):
-                    return ""
-                x = max(0.5, min(1.5, float(v)))
-                if x <= 1.0:
-                    t = (x - 0.5) / 0.5
-                    r = int(200 + t * 55); g = 240; b = int(200 + t * 55)
-                else:
-                    t = (x - 1.0) / 0.5
-                    r = 255; g = int(240 - t * 100); b = int(255 - t * 155)
-                return f"background-color: rgba({r},{g},{b},0.55);"
+        # -----------------------------------------------------------------
+        # Sub-tabs for the different views of the same result
+        # -----------------------------------------------------------------
+        res_tab_heat, res_tab_lines, res_tab_leader, res_tab_abs = st.tabs(
+            ["🔥 Heat map", "📈 Curves", "🏆 Leaderboard", "📏 Absolute RMSPE"]
+        )
 
+        def _bg(v):
+            if pd.isna(v):
+                return ""
+            x = max(0.5, min(1.5, float(v)))
+            if x <= 1.0:
+                t = (x - 0.5) / 0.5
+                r = int(200 + t * 55); g = 240; b = int(200 + t * 55)
+            else:
+                t = (x - 1.0) / 0.5
+                r = 255; g = int(240 - t * 100); b = int(255 - t * 155)
+            return f"background-color: rgba({r},{g},{b},0.55);"
+
+        display = res.rel_rmspe.copy()
+        display.index = [infos[k].name for k in display.index]
+        display.columns = [f"h={h}" for h in display.columns]
+
+        with res_tab_heat:
+            st.markdown(
+                f"**Relative RMSPE vs. {infos[FW_BENCHMARK_KEY].name}.** "
+                "Green = beats the benchmark, red = loses. **Sorted by long-horizon "
+                "performance** (best at the top)."
+            )
+            if long_h in res.rel_rmspe.columns:
+                order = res.rel_rmspe[long_h].sort_values().index
+                display = display.reindex([infos[k].name for k in order])
             st.dataframe(
                 display.style.format("{:.2f}").map(_bg),
                 use_container_width=True,
             )
             st.caption(
-                "Cells < 1.00 (green) = model beats the benchmark at that horizon; "
-                "cells > 1.00 (red) = benchmark beats the model. The benchmark row is "
-                "flat 1.00 by construction."
+                f"Sample: {int(res.n.iloc[0].max())} origin dates at h={res.horizons[0]}, "
+                f"{int(res.n.iloc[0].min())} at h={res.horizons[-1]}."
             )
 
-            # Absolute RMSPE table for reference
-            with st.expander("Absolute RMSPE (percentage points)"):
-                abs_df = res.rmspe.copy()
-                abs_df.index = [infos[k].name for k in abs_df.index]
-                abs_df.columns = [f"h={h}" for h in abs_df.columns]
-                st.dataframe(abs_df.style.format("{:.3f}"),
-                             use_container_width=True)
-
-            # Chart: relative RMSPE curves across horizons
+        with res_tab_lines:
+            st.markdown(
+                "**Relative RMSPE across horizons.** One line per model — lower is "
+                "better. Dashed line at 1.0 = the fixed-ρ benchmark. "
+                "Faust–Wright's finding: **subjective forecasts (SPF, Greenbook, BC) "
+                "flatten below 1.0 at long horizons**, model-based ones drift upward."
+            )
             fig_fw = go.Figure()
             for k in keys:
-                ys = res.rel_rmspe.loc[k].values
+                # Highlight survey benchmarks with thicker line
+                is_survey = k in ("spf", "gb", "bc")
+                width = 3 if is_survey else 1.6
                 fig_fw.add_trace(go.Scatter(
-                    x=[f"h={h}" for h in res.horizons], y=ys,
+                    x=[f"h={h}" for h in res.horizons],
+                    y=res.rel_rmspe.loc[k].values,
                     name=infos[k].name,
                     line=dict(color=color_for(k, infos[k].family, list(keys)),
-                              width=2),
+                              width=width, dash="solid" if is_survey else "solid"),
                     hovertemplate=f"{infos[k].name}<br>%{{x}}: %{{y:.2f}}<extra></extra>",
                 ))
-            fig_fw.add_hline(y=1.0, line=dict(color=COLORS["muted"], dash="dot",
-                                              width=1),
-                             annotation_text="benchmark",
-                             annotation_position="right",
+            fig_fw.add_hline(y=1.0, line=dict(color=COLORS["muted"], dash="dot", width=1.5),
+                             annotation_text="benchmark = 1.0",
+                             annotation_position="top right",
                              annotation_font_color=COLORS["muted"])
             fig_fw.update_layout(**CHART_LAYOUT)
-            fig_fw.update_layout(height=460, margin=dict(t=30, b=40, l=10, r=20),
-                                 yaxis_title="Relative RMSPE")
-            st.markdown("#### Relative RMSPE across horizons")
+            fig_fw.update_layout(
+                height=520, margin=dict(t=30, b=40, l=10, r=20),
+                yaxis_title="Relative RMSPE",
+            )
             st.plotly_chart(fig_fw, use_container_width=True,
                             config={"displayModeBar": False})
 
-            st.caption(
-                f"n valid pairs per model: {int(res.n.iloc[0].max())} at h={res.horizons[0]}, "
-                f"{int(res.n.iloc[0].min())} at h={res.horizons[-1]}. "
-                "Faust–Wright's key qualitative findings: (i) subjective forecasts (SPF, "
-                "Greenbook, Blue-Chip — not shown here) dominate all model-based ones; "
-                "(ii) gap-form models substantially outperform stationary models at "
-                "medium and long horizons; (iii) the fixed-ρ benchmark is remarkably "
-                "hard to beat by more than ~10%."
+        with res_tab_leader:
+            st.markdown(
+                f"**Leaderboard at each horizon** — sorted best-to-worst by rel_RMSPE."
             )
-    else:
-        st.info(
-            "Choose a configuration above, then click **Run Faust–Wright horse race**. "
-            "A quick run with default settings takes ~30–60 seconds."
-        )
+            lb_cols = st.columns(min(len(res.horizons), 4))
+            for i, h in enumerate(res.horizons):
+                col = lb_cols[i % len(lb_cols)]
+                with col:
+                    st.caption(f"**h = {h}**")
+                    lb = res.rel_rmspe[h].sort_values().dropna()
+                    lb_df = pd.DataFrame({
+                        "Model": [infos[k].name for k in lb.index],
+                        "rel_RMSPE": lb.values,
+                    })
+                    st.dataframe(
+                        lb_df.style.format({"rel_RMSPE": "{:.2f}"}).map(
+                            _bg, subset=["rel_RMSPE"]
+                        ),
+                        use_container_width=True, hide_index=True,
+                    )
+
+        with res_tab_abs:
+            st.markdown(
+                "**Absolute RMSPE (percentage points).** Undivided version of the "
+                "heat map. Useful when comparing across inflation measures — the "
+                "denominator changes but the raw errors stay in the same units."
+            )
+            abs_df = res.rmspe.copy()
+            abs_df.index = [infos[k].name for k in abs_df.index]
+            abs_df.columns = [f"h={h}" for h in abs_df.columns]
+            st.dataframe(abs_df.style.format("{:.3f}"),
+                         use_container_width=True)
 
 
 # --------------------------------------------------------------------------- #
