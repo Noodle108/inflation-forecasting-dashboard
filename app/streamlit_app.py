@@ -4,6 +4,7 @@ Run with:  streamlit run app/streamlit_app.py
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -144,11 +145,23 @@ def get_data(freq: str):
 
 
 @st.cache_resource(show_spinner=False)
-def fit_model(freq: str, infl_key: str, key: str):
+def fit_model(freq: str, infl_key: str, key: str, hp_json: str = ""):
+    """Fit and cache a single model.
+
+    ``hp_json`` — JSON-serialized hyperparameter dict. Passed positionally so
+    Streamlit's cache keys on the actual values (dicts aren't hashable). Empty
+    string means "use the class defaults" and is the fast-path.
+    """
     d = get_data(freq)
     y = d.series(infl_key)
     X = d.activity if not d.activity.empty else None
-    m = registry.make(key)
+    hp = json.loads(hp_json) if hp_json else {}
+    # instantiate with custom hyperparams if any, else default factory
+    if hp:
+        cls = type(registry.make(key))    # get the class
+        m = cls(**hp)
+    else:
+        m = registry.make(key)
     m.fit(y, X)
     return m
 
@@ -266,6 +279,159 @@ for fam in _FAMILY_ORDER:
 chosen = [k for k in infos if k in _current]
 st.session_state["chosen_models"] = chosen
 
+# --------------------------------------------------------------------------- #
+# Per-model customization sliders
+# --------------------------------------------------------------------------- #
+# For each selected structural model whose parameters we've exposed as
+# __init__ kwargs, render a collapsed expander with the right sliders.
+# `CUSTOM_SPEC[key]` is a list of (kw_arg, label, min, max, default, step, help).
+CUSTOM_SPEC: dict[str, list] = {
+    "nkpc": [
+        ("anchor_override", "Long-run anchor π^LR (%)",
+         0.5, 6.0, None, 0.1,
+         "Where the forecast reverts to. Default: Cleveland Fed 10-yr expected "
+         "inflation (EXPINF10YR). Move the slider to run a counterfactual — "
+         "e.g. 'what if the anchor were 3% instead of 2.5%?'"),
+    ],
+    "tvtnkpc": [
+        ("anchor_override", "Long-run anchor τ (%)",
+         0.5, 6.0, None, 0.1,
+         "Replaces the EXPINF10YR-derived trend with a constant. Set to "
+         "explore anchoring scenarios."),
+    ],
+    "dsge": [
+        ("sigma", "σ — intertemporal elasticity", 0.5, 3.0, 1.0, 0.1,
+         "Coefficient on the ex-ante real rate in the IS curve. Higher σ = "
+         "spending responds less to real rates. Standard value 1.0 (log utility)."),
+        ("kappa", "κ — NKPC slope", 0.005, 0.30, 0.05, 0.005,
+         "How strongly the output gap transmits into inflation. Empirical "
+         "estimates 0.01-0.10. Higher κ = steeper Phillips curve."),
+        ("phi_pi", "φ_π — Taylor rule inflation response", 1.05, 3.0, 1.5, 0.05,
+         "Central bank's rate response to a 1pp rise in inflation. Standard "
+         "value 1.5 (Taylor). Must exceed 1 for determinacy."),
+        ("phi_x", "φ_x — Taylor rule output-gap response", 0.0, 1.0, 0.125, 0.025,
+         "Central bank's rate response to a 1pp rise in the output gap. Standard "
+         "0.125 (Taylor 1993)."),
+    ],
+    "nyfed": [
+        ("sigma", "σ — intertemporal elasticity", 0.5, 3.0, 1.0, 0.1,
+         "Same as in the small NK DSGE."),
+        ("kappa", "κ — NKPC slope", 0.005, 0.30, 0.05, 0.005,
+         "Higher κ = steeper Phillips curve."),
+        ("phi_pi", "φ_π — Taylor rule inflation response", 1.05, 3.0, 1.5, 0.05,
+         "Must exceed 1 for determinacy."),
+        ("phi_x", "φ_x — Taylor rule output-gap response", 0.0, 1.0, 0.125, 0.025,
+         "Standard 0.125."),
+    ],
+    "sw07": [
+        ("crpi", "Taylor rule inflation response (φ_π)", 1.05, 3.0, 2.04, 0.05,
+         "SW07 posterior mode = 2.04. Determines how aggressively policy leans "
+         "against inflation."),
+        ("crr", "Taylor rule interest-rate smoothing (ρ)", 0.0, 0.95, 0.81, 0.05,
+         "SW07 posterior mode = 0.81. Higher = more sluggish rate adjustment "
+         "(closer to actual Fed behavior)."),
+        ("chabb", "Consumption habit (h)", 0.0, 0.95, 0.71, 0.05,
+         "SW07 posterior mode = 0.71. Persistence of consumption; higher = "
+         "smoother demand response."),
+        ("cprobp", "Calvo price stickiness (θ_p)", 0.30, 0.90, 0.66, 0.02,
+         "Fraction of firms *unable* to reprice each quarter. SW07 mode = 0.66 "
+         "→ average price duration ~ 3 quarters."),
+    ],
+    "bb": [
+        ("n_lags", "Number of lags in wage/price equations", 1, 4, 2, 1,
+         "Bernanke-Blanchard (2023) use 4 quarterly lags. Lower = smoother "
+         "estimates but less flexible dynamics."),
+    ],
+}
+
+
+def _slider_key(model_key: str, kw: str) -> str:
+    return f"cust__{model_key}__{kw}"
+
+
+def _collect_customization(chosen_keys: list[str]) -> dict[str, dict]:
+    """Read the current slider values into a {model_key: {kw: value}} dict.
+    Only non-default values are recorded so caching stays efficient."""
+    out: dict[str, dict] = {}
+    for k in chosen_keys:
+        if k not in CUSTOM_SPEC:
+            continue
+        specs = CUSTOM_SPEC[k]
+        overrides = {}
+        for spec in specs:
+            kw, _label, _lo, _hi, default, _step, _help = spec
+            state_key = _slider_key(k, kw)
+            val = st.session_state.get(state_key)
+            if val is None:
+                continue
+            if default is None:
+                # Anchor-override sliders — always send the value (there is no
+                # default to compare against; the model itself falls back when
+                # anchor_override is None, but the slider is always concrete).
+                overrides[kw] = float(val)
+            elif val != default:
+                overrides[kw] = (int(val) if isinstance(default, int) else float(val))
+        if overrides:
+            out[k] = overrides
+    return out
+
+
+# Render the customization expander if any selected model has knobs.
+_customizable = [k for k in chosen if k in CUSTOM_SPEC]
+if _customizable:
+    st.sidebar.markdown("### ⚙️ Customize model assumptions")
+    st.sidebar.caption(
+        "Override calibrated parameters for the selected structural models. "
+        "Values persist across reruns."
+    )
+    # Enable/disable customization globally, so a user can quickly A/B against defaults.
+    _cust_on = st.sidebar.toggle(
+        "Apply customization", value=st.session_state.get("cust_on", False),
+        key="cust_on",
+        help="When off, sliders below are ignored and models use their default "
+             "calibrations.",
+    )
+    for k in _customizable:
+        info = infos[k]
+        color = COLORS.get(info.family, COLORS["muted"])
+        with st.sidebar.expander(f"{info.name}"):
+            for kw, label, lo, hi, default, step, help_text in CUSTOM_SPEC[k]:
+                skey = _slider_key(k, kw)
+                # Initial value: user's previous choice, else the model default,
+                # else the midpoint (for anchor overrides where default is None).
+                if default is None:
+                    init = st.session_state.get(skey, 2.5)   # sensible anchor start
+                else:
+                    init = st.session_state.get(skey, default)
+                # Use int slider for integer-typed parameters (BB n_lags).
+                if isinstance(default, int):
+                    st.slider(label, int(lo), int(hi), int(init), int(step),
+                              key=skey, help=help_text)
+                else:
+                    st.slider(label, float(lo), float(hi), float(init),
+                              float(step), key=skey, help=help_text)
+            # Reset button — sets every slot for this model back to its default.
+            if st.button(f"Reset {info.name} to defaults", key=f"reset_{k}"):
+                for kw, _l, _lo, _hi, default, _s, _h in CUSTOM_SPEC[k]:
+                    st.session_state[_slider_key(k, kw)] = (
+                        default if default is not None else 2.5
+                    )
+                st.rerun()
+else:
+    _cust_on = False
+
+# Collect the final customization dict — used at fit-time to key the cache.
+_custom_hp = _collect_customization(chosen) if _cust_on else {}
+
+
+def model_hp_json(key: str) -> str:
+    """JSON of hyperparameters for `key`; empty string = defaults."""
+    hp = _custom_hp.get(key)
+    if not hp:
+        return ""
+    return json.dumps(hp, sort_keys=True)
+
+
 horizon = st.sidebar.slider("Forecast horizon (periods ahead)", 1, 24,
                             12 if freq == "M" else 4)
 st.sidebar.caption(
@@ -349,7 +515,7 @@ with tab_overview:
     with st.spinner("Fitting selected models…"):
         for k in chosen:
             try:
-                m = fit_model(freq, infl_key, k)
+                m = fit_model(freq, infl_key, k, model_hp_json(k))
                 path = forecast_path(m, horizon)
                 fc_paths[k] = path
                 fc_rows.append((infos[k].name, infos[k].family, path[0], path[-1]))
@@ -539,7 +705,7 @@ with tab_overview:
                 # AR(p): expose the lag order actually selected by the fitted model.
                 if k == "ar":
                     try:
-                        m = fit_model(freq, infl_key, "ar")
+                        m = fit_model(freq, infl_key, "ar", model_hp_json("ar"))
                         p_star = getattr(m, "_selected_p", None)
                         n_lags = getattr(m, "_num_lags", None)
                         if p_star is not None:
@@ -556,7 +722,7 @@ with tab_overview:
                 # answer the "why is my forecast flat?" question by making the
                 # implied long-run destination explicit.
                 try:
-                    m = fit_model(freq, infl_key, k)
+                    m = fit_model(freq, infl_key, k, model_hp_json(k))
                     ss = None
                     if hasattr(m, "steady_state"):
                         try:

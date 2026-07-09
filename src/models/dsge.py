@@ -55,12 +55,17 @@ class NewKeynesianPC(ForecastModel):
     )
 
     def __init__(self, okun: float = -2.0, activity_col: str = "ngap",
-                 anchor_col: str = "exp10yr"):
+                 anchor_col: str = "exp10yr", anchor_override: float | None = None):
         super().__init__(okun=okun, activity_col=activity_col,
-                         anchor_col=anchor_col)
+                         anchor_col=anchor_col,
+                         anchor_override=anchor_override)
         self.okun = okun
         self.activity_col = activity_col
         self.anchor_col = anchor_col
+        # If set, replaces the EXPINF10YR-derived anchor with a constant value
+        # (in annualized-percent units). Lets the UI ask "what if the long-run
+        # anchor were 2% instead of 2.5%?".
+        self.anchor_override = anchor_override
 
     def _fit(self) -> None:
         import statsmodels.api as sm
@@ -68,8 +73,10 @@ class NewKeynesianPC(ForecastModel):
         pi = self._y
         Xdf = self._X if self._X is not None else pd.DataFrame(index=pi.index)
 
-        # Long-run anchor π^LR: Cleveland Fed EXPINF10YR if present, else sample mean.
-        if self.anchor_col in getattr(Xdf, "columns", []):
+        # Long-run anchor π^LR: user override > EXPINF10YR > sample mean.
+        if self.anchor_override is not None:
+            anchor = pd.Series(float(self.anchor_override), index=pi.index)
+        elif self.anchor_col in getattr(Xdf, "columns", []):
             anchor = Xdf[self.anchor_col].reindex(pi.index).ffill().bfill()
         else:
             anchor = pd.Series(float(pi.mean()), index=pi.index)
@@ -219,13 +226,23 @@ class SmallScaleDSGE(ForecastModel):
         forecast_shape="A path that mean-reverts to the inflation target as the estimated shocks decay, at speeds set by their persistence.",
     )
 
-    # calibrated deep parameters (standard textbook values)
-    DEEP = dict(beta=0.99, sigma=1.0, kappa=0.05, phi_pi=1.5, phi_x=0.125)
+    # calibrated deep parameters (standard textbook values). Defaults follow
+    # Galí (2008); the four non-β params are user-tunable through __init__.
+    DEEP_DEFAULT = dict(beta=0.99, sigma=1.0, kappa=0.05, phi_pi=1.5, phi_x=0.125)
 
-    def __init__(self, activity_col: str = "ngap", okun: float = -2.0):
-        super().__init__(activity_col=activity_col, okun=okun)
+    def __init__(self, activity_col: str = "ngap", okun: float = -2.0,
+                 sigma: float | None = None, kappa: float | None = None,
+                 phi_pi: float | None = None, phi_x: float | None = None):
+        super().__init__(activity_col=activity_col, okun=okun,
+                         sigma=sigma, kappa=kappa, phi_pi=phi_pi, phi_x=phi_x)
         self.activity_col = activity_col
         self.okun = okun
+        # Build the calibration dict — user overrides win, else textbook default.
+        self.DEEP = dict(self.DEEP_DEFAULT)
+        if sigma is not None:  self.DEEP["sigma"] = float(sigma)
+        if kappa is not None:  self.DEEP["kappa"] = float(kappa)
+        if phi_pi is not None: self.DEEP["phi_pi"] = float(phi_pi)
+        if phi_x is not None:  self.DEEP["phi_x"] = float(phi_x)
 
     def _fit(self) -> None:
         from scipy.optimize import minimize

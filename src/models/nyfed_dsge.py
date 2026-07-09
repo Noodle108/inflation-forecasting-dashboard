@@ -137,12 +137,21 @@ class NYFedDSGE(ForecastModel):
         forecast_shape="A mean-reverting path whose speed depends on which shock currently dominates — persistent credit spreads drag inflation down for longer than monetary shocks.",
     )
 
-    DEEP = dict(beta=0.99, sigma=1.0, kappa=0.05, phi_pi=1.5, phi_x=0.125)
+    DEEP_DEFAULT = dict(beta=0.99, sigma=1.0, kappa=0.05, phi_pi=1.5, phi_x=0.125)
 
-    def __init__(self, activity_col: str = "ngap", okun: float = -2.0):
-        super().__init__(activity_col=activity_col, okun=okun)
+    def __init__(self, activity_col: str = "ngap", okun: float = -2.0,
+                 sigma: float | None = None, kappa: float | None = None,
+                 phi_pi: float | None = None, phi_x: float | None = None):
+        super().__init__(activity_col=activity_col, okun=okun,
+                         sigma=sigma, kappa=kappa, phi_pi=phi_pi, phi_x=phi_x)
         self.activity_col = activity_col
         self.okun = okun
+        # Same 4-knob deep-param override as SmallScaleDSGE.
+        self.DEEP = dict(self.DEEP_DEFAULT)
+        if sigma is not None:  self.DEEP["sigma"] = float(sigma)
+        if kappa is not None:  self.DEEP["kappa"] = float(kappa)
+        if phi_pi is not None: self.DEEP["phi_pi"] = float(phi_pi)
+        if phi_x is not None:  self.DEEP["phi_x"] = float(phi_x)
 
     def _fit(self) -> None:
         from scipy.optimize import minimize

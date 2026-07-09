@@ -336,10 +336,29 @@ class SmetsWouters2007(ForecastModel):
         forecast_shape="A slow, theory-driven mean-reversion of inflation toward the model's steady state as the estimated shocks decay.",
     )
 
+    # Names of SW07 parameters we let the UI override. Each corresponds to a
+    # single deep parameter in SW_PARAMS.
+    _USER_OVERRIDES = ("crpi", "crr", "chabb", "cprobp")
+
+    def __init__(self, crpi: float | None = None, crr: float | None = None,
+                 chabb: float | None = None, cprobp: float | None = None):
+        # Build the params dict — user overrides win, else the SW07 posterior mode.
+        overrides = dict(crpi=crpi, crr=crr, chabb=chabb, cprobp=cprobp)
+        supplied = {k: float(v) for k, v in overrides.items() if v is not None}
+        super().__init__(**supplied)
+        self._param_overrides = supplied
+
     def _fit(self) -> None:
-        sol = solve_sw()
+        # Merge SW07 posterior-mode params with any user overrides.
+        params = dict(SW_PARAMS)
+        params.update(self._param_overrides)
+        sol = solve_sw(params)
         if sol["eu"] != [1, 1]:
-            raise RuntimeError(f"SW07 has no unique stable solution (eu={sol['eu']}).")
+            raise RuntimeError(
+                f"SW07 has no unique stable solution (eu={sol['eu']}). "
+                f"Try widening the Taylor-rule inflation response (crpi) or "
+                f"lowering the habit / stickiness params."
+            )
         self._sol = sol
         obs = load_sw_observables()
         self._pinf_mean_q = obs.attrs["pinf_mean_q"]
@@ -347,7 +366,7 @@ class SmetsWouters2007(ForecastModel):
 
         G1, impact = sol["G1"], sol["impact"]
         n = G1.shape[0]
-        sig2 = np.array([SW_PARAMS[f"sig_{s}"] ** 2 for s in
+        sig2 = np.array([params[f"sig_{s}"] ** 2 for s in
                          ["a", "b", "g", "qs", "m", "pinf", "w"]])
         Q = impact @ np.diag(sig2) @ impact.T
 

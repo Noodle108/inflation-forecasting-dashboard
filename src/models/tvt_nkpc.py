@@ -68,12 +68,16 @@ class TVTNKPC(ForecastModel):
     )
 
     def __init__(self, activity_col: str = "ngap", anchor_col: str = "exp10yr",
-                 alpha_fallback: float = 0.95):
+                 alpha_fallback: float = 0.95,
+                 anchor_override: float | None = None):
         super().__init__(activity_col=activity_col, anchor_col=anchor_col,
-                         alpha_fallback=alpha_fallback)
+                         alpha_fallback=alpha_fallback,
+                         anchor_override=anchor_override)
         self.activity_col = activity_col
         self.anchor_col = anchor_col
         self.alpha_fallback = alpha_fallback
+        # If set, replaces the EXPINF10YR-derived τ path with a constant value.
+        self.anchor_override = anchor_override
 
     def _fit(self) -> None:
         import statsmodels.api as sm
@@ -81,10 +85,12 @@ class TVTNKPC(ForecastModel):
         y = self._y
         Xdf = self._X if self._X is not None else pd.DataFrame(index=y.index)
 
-        # ---- Trend: prefer EXPINF10YR; fall back to exponentially smoothed y. ----
-        if self.anchor_col in getattr(Xdf, "columns", []):
+        # ---- Trend: user override > EXPINF10YR > exponentially smoothed y. ----
+        if self.anchor_override is not None:
+            tau = pd.Series(float(self.anchor_override), index=y.index)
+            self._anchor_source = f"user override ({self.anchor_override:.2f}%)"
+        elif self.anchor_col in getattr(Xdf, "columns", []):
             tau_raw = Xdf[self.anchor_col].reindex(y.index)
-            # ffill forward; bfill only what's needed at the far left of the sample
             tau = tau_raw.ffill()
             if tau.isna().any():
                 tau_es = _exp_smooth(y, self.alpha_fallback)
