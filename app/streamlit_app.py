@@ -205,51 +205,66 @@ _HIDE_FROM_SIDEBAR = {k for k in infos
 # Default picks — one canonical benchmark, one univariate stat model, one structural.
 _default_models = [k for k in ["rw", "ao", "ar", "ucsv", "dsge"] if k in infos]
 
-# Persist selection across reruns.
-if "chosen_models" not in st.session_state:
-    st.session_state["chosen_models"] = list(_default_models)
+# All model keys that show up in the sidebar (used by the presets to write to
+# each checkbox's session-state slot).
+_SIDEBAR_KEYS = [k for k in infos if k not in _HIDE_FROM_SIDEBAR]
 
-# Presets — one click bulk-selects a coherent set.
+
+def _apply_preset(picks: list[str]) -> None:
+    """Set every ``pick_<k>`` checkbox state to match ``picks``. Must run BEFORE
+    the checkboxes render on this rerun — Streamlit checkboxes ignore the
+    ``value=`` argument once their key exists in session_state, so writing
+    session_state directly is the only way a preset button can flip them."""
+    picks_set = set(picks)
+    for k in _SIDEBAR_KEYS:
+        st.session_state[f"pick_{k}"] = (k in picks_set)
+
+
+# Seed defaults on first render.
+if "_sidebar_seeded" not in st.session_state:
+    _apply_preset(_default_models)
+    st.session_state["_sidebar_seeded"] = True
+
+# Presets — one click bulk-selects a coherent set. Because these callbacks
+# fire BEFORE the checkboxes render on this rerun, they successfully
+# override the widgets' remembered state.
 st.sidebar.markdown("### Models to compare")
 _p_cols = st.sidebar.columns(3)
 if _p_cols[0].button("Basic", help="RW, AO, AR — the classic 3-model benchmark",
                      use_container_width=True):
-    st.session_state["chosen_models"] = [k for k in ["rw", "ao", "ar"] if k in infos]
+    _apply_preset([k for k in ["rw", "ao", "ar"] if k in infos])
 if _p_cols[1].button("Recommended",
                      help="Balanced mix across the three families",
                      use_container_width=True):
-    st.session_state["chosen_models"] = [k for k in
-                                          ["rw", "ao", "ucsv", "ar", "nkpc",
-                                           "tvtnkpc", "dsge", "bb"]
-                                          if k in infos]
+    _apply_preset([k for k in
+                   ["rw", "ao", "ucsv", "ar", "nkpc", "tvtnkpc", "dsge", "bb"]
+                   if k in infos])
 if _p_cols[2].button("Clear", help="Uncheck everything", use_container_width=True):
-    st.session_state["chosen_models"] = []
+    _apply_preset([])
 
 # Family-grouped checkboxes. Each family is a collapsible expander so the
-# sidebar isn't a wall of 15 items.
-_current = set(st.session_state["chosen_models"])
+# sidebar isn't a wall of 15 items. Read the source-of-truth *from the widget
+# states* (which the preset buttons above have already synced), so the
+# expander header counts are always accurate.
+_current: set[str] = set()
 for fam in _FAMILY_ORDER:
     fam_keys = [k for k in _by_family.get(fam, []) if k not in _HIDE_FROM_SIDEBAR]
     if not fam_keys:
         continue
-    fam_count = sum(1 for k in fam_keys if k in _current)
+    fam_count = sum(1 for k in fam_keys if st.session_state.get(f"pick_{k}", False))
     with st.sidebar.expander(
         f"{_FAMILY_EMOJI.get(fam, '')} **{fam}** ({fam_count}/{len(fam_keys)})",
         expanded=(fam == "Benchmark"),
     ):
         for k in fam_keys:
             i = infos[k]
-            checked = st.checkbox(
-                i.name, value=(k in _current),
-                key=f"pick_{k}",
-                help=i.reference,
-            )
+            # No ``value=`` — the checkbox owns its state under ``pick_<k>``.
+            checked = st.checkbox(i.name, key=f"pick_{k}", help=i.reference)
             if checked:
                 _current.add(k)
-            else:
-                _current.discard(k)
-st.session_state["chosen_models"] = [k for k in infos if k in _current]
-chosen = st.session_state["chosen_models"]
+
+chosen = [k for k in infos if k in _current]
+st.session_state["chosen_models"] = chosen
 
 horizon = st.sidebar.slider("Forecast horizon (periods ahead)", 1, 24,
                             12 if freq == "M" else 4)
@@ -344,11 +359,12 @@ with tab_overview:
     # Determine the x-range and y-range for the view.
     if zoom_mode:
         # Focus on the forecast band + a short lead-in of history.
-        lead_in = pd.DateOffset(months=6 if freq == "M" else 3)
-        view_start = last_date - lead_in
+        lead_in_months = 6 if freq == "M" else 3      # ~2 quarters lead-in
+        view_start = last_date - pd.DateOffset(months=lead_in_months)
         view_end = fc_dates[-1] + pd.DateOffset(months=1 if freq == "M" else 3)
-        # Auto-fit y: use only the forecast values + last realized as reference.
-        y_vals = [last_val]
+        # Auto-fit y: include realized values in the lead-in window AND forecasts.
+        realized_in_view = y[y.index >= view_start]
+        y_vals = list(realized_in_view.values) + [last_val]
         for path in fc_paths.values():
             y_vals.extend(path.tolist())
         if y_vals:
@@ -368,13 +384,16 @@ with tab_overview:
 
     fig = go.Figure()
 
-    # Realized inflation (skip in zoom mode — only draw the last point as a marker).
+    # Realized inflation. In zoom mode we still draw the line but only over the
+    # lead-in window — the user asked to see the actual realized series before
+    # the forecast band, not just a marker.
     if zoom_mode:
+        realized_view = y[y.index >= view_start]
         fig.add_trace(go.Scatter(
-            x=[last_date], y=[last_val], name="Latest realized",
-            mode="markers",
-            marker=dict(color=COLORS["realized"], size=9,
-                        line=dict(color="white" if not DARK else "#0f172a", width=1.5)),
+            x=realized_view.index, y=realized_view.values, name="Realized",
+            line=dict(color=COLORS["realized"], width=2.5),
+            mode="lines+markers",
+            marker=dict(size=5),
             showlegend=(legend_mode == "Legend (top)"),
             hovertemplate="%{x|%b %Y}<br><b>%{y:.2f}%</b><extra>Realized</extra>",
         ))
