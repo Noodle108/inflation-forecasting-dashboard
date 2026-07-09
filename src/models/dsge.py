@@ -90,9 +90,12 @@ class NewKeynesianPC(ForecastModel):
             ugap = pd.Series(0.0, index=pi.index)
         gap = self.okun * ugap
 
-        # Expectation-gap form: (π - π^LR) = c + b (π_{t-1} - π^LR) + κ · gap + ε.
-        # The constant absorbs any small mean deviation; b < 1 gives dynamic
-        # convergence to π^LR in the no-shock forecast.
+        # Expectation-gap form: (π - π^LR) = b (π_{t-1} - π^LR) + κ · gap + ε.
+        # **No intercept** — this forces the long-run destination to be π^LR
+        # itself. Adding a constant would let OLS fit c = mean(π_gap) - b·..., and
+        # the forecast steady state c/(1-b) would recover the sample mean of
+        # π regardless of the anchor override. Omitting c makes the anchor
+        # actually bind.
         df = pd.DataFrame({
             "pi_gap": pi - anchor,
             "pi_gap_l1": (pi - anchor).shift(1),
@@ -102,8 +105,9 @@ class NewKeynesianPC(ForecastModel):
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            Xp = sm.add_constant(df[["pi_gap_l1", "gap"]].values)
+            Xp = df[["pi_gap_l1", "gap"]].values          # no add_constant
             self._nkpc = sm.OLS(df["pi_gap"].values, Xp).fit()
+            # The gap AR still gets an intercept (small-sample stability).
             Xg = sm.add_constant(df["gap_l1"].values)
             self._gap_ar = sm.OLS(df["gap"].values, Xg).fit()
 
@@ -111,22 +115,26 @@ class NewKeynesianPC(ForecastModel):
         self._last_gap = float(df["gap"].iloc[-1])
 
     def _forecast(self, h: int) -> float:
-        c_pi, b_pi, k_pi = self._nkpc.params
+        b_pi, k_pi = self._nkpc.params
         c_g, rho_g = self._gap_ar.params
         pi_gap, gap = self._last_pi_gap, self._last_gap
         for _ in range(h):
             gap = c_g + rho_g * gap
-            pi_gap = c_pi + b_pi * pi_gap + k_pi * gap
+            pi_gap = b_pi * pi_gap + k_pi * gap
         return float(self._last_anchor + pi_gap)
 
     def steady_state(self) -> float:
-        """Long-run forecast the model converges to (anchor + implied gap-steady-state)."""
-        c_pi, b_pi, k_pi = self._nkpc.params
+        """Long-run forecast the model converges to.
+
+        With no intercept in the pi_gap regression, in a shock-free world
+        pi_gap → κ·gap_ss / (1 - b), so long-run inflation = anchor + that.
+        """
+        b_pi, k_pi = self._nkpc.params
         c_g, rho_g = self._gap_ar.params
         if abs(rho_g) >= 1 or abs(b_pi) >= 1:
-            return float("nan")
+            return float(self._last_anchor)
         gap_ss = c_g / (1 - rho_g)
-        pi_gap_ss = (c_pi + k_pi * gap_ss) / (1 - b_pi)
+        pi_gap_ss = (k_pi * gap_ss) / (1 - b_pi)
         return float(self._last_anchor + pi_gap_ss)
 
 

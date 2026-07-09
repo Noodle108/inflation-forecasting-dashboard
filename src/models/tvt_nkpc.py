@@ -113,7 +113,11 @@ class TVTNKPC(ForecastModel):
         dd = d.dropna()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            Xg = sm.add_constant(dd[["gap_l1", "ugap"]].values)
+            # No intercept in the gap equation. A constant would soak up the
+            # historical mean of (π − τ), so overriding the τ anchor at
+            # forecast time would not shift the long-run destination. Omitting
+            # it makes τ_T bind as the true long-run anchor.
+            Xg = dd[["gap_l1", "ugap"]].values
             self._gap_eq = sm.OLS(dd["gap"].values, Xg).fit()
             a = pd.DataFrame({"u": ugap}); a["u_l1"] = a["u"].shift(1)
             ad = a.dropna()
@@ -124,20 +128,23 @@ class TVTNKPC(ForecastModel):
         self._last_ugap = float(ugap.iloc[-1])
 
     def _forecast(self, h: int) -> float:
-        c_g, rho, lam = self._gap_eq.params
+        rho, lam = self._gap_eq.params
         c_u, b_u = self._ugap_ar.params
         gap, ugap = self._last_gap, self._last_ugap
         for _ in range(h):
             ugap = c_u + b_u * ugap
-            gap = c_g + rho * gap + lam * ugap
+            gap = rho * gap + lam * ugap
         return self._trend + gap
 
     def steady_state(self) -> float:
-        """Anchor plus the gap's implied unconditional mean."""
-        c_g, rho, lam = self._gap_eq.params
+        """Anchor plus the gap's implied unconditional mean.
+
+        With no intercept in the gap eq, gap_ss = λ·ugap_ss / (1 - rho).
+        """
+        rho, lam = self._gap_eq.params
         c_u, b_u = self._ugap_ar.params
         if abs(rho) >= 1 or abs(b_u) >= 1:
             return float(self._trend)
         ugap_ss = c_u / (1 - b_u)
-        gap_ss = (c_g + lam * ugap_ss) / (1 - rho)
+        gap_ss = (lam * ugap_ss) / (1 - rho)
         return float(self._trend + gap_ss)
