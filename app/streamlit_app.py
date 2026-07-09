@@ -362,15 +362,18 @@ with tab_overview:
         lead_in_months = 6 if freq == "M" else 3      # ~2 quarters lead-in
         view_start = last_date - pd.DateOffset(months=lead_in_months)
         view_end = fc_dates[-1] + pd.DateOffset(months=1 if freq == "M" else 3)
-        # Auto-fit y: include realized values in the lead-in window AND forecasts.
-        realized_in_view = y[y.index >= view_start]
-        y_vals = list(realized_in_view.values) + [last_val]
+        # Auto-fit y to the *forecast values only* — the realized line is still
+        # drawn but is allowed to clip off the top of the chart if today's
+        # print is much higher than where the models expect inflation to head.
+        # This keeps the vertical scale tight enough to see differences
+        # between model paths.
+        y_vals = [last_val]
         for path in fc_paths.values():
             y_vals.extend(path.tolist())
         if y_vals:
             y_lo, y_hi = min(y_vals), max(y_vals)
             span = max(0.5, y_hi - y_lo)
-            y_range = [y_lo - 0.15 * span, y_hi + 0.15 * span]
+            y_range = [y_lo - 0.20 * span, y_hi + 0.20 * span]
         else:
             y_range = None
     elif yrs is None:
@@ -483,7 +486,10 @@ with tab_overview:
     )
     st.plotly_chart(fig, use_container_width=True,
                     config={"displayModeBar": False})
-    _caption_prefix = "Zoomed to forecast band. " if zoom_mode else \
+    _caption_prefix = ("Zoomed to the forecast band — y-axis is scaled to the "
+                       "model forecasts, so the realized line may clip off the "
+                       "chart when today's print is far from where the models "
+                       "expect inflation to settle. ") if zoom_mode else \
                        f"Solid line: realized {labels.get(infl_key, infl_key)}. "
     st.caption(
         f"{_caption_prefix}Dotted lines: each model's forecast path from now to "
