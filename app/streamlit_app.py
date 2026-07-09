@@ -242,36 +242,95 @@ with tab_overview:
     last_date, last_val = y.index[-1], float(y.iloc[-1])
     fc_dates = [last_date + step * h for h in range(1, horizon + 1)]
 
-    # Range-preset UI as Streamlit buttons: keep the chart itself clean, and let
-    # Streamlit re-run when a preset is picked. State survives reruns.
-    RANGES = [("1Y", 1), ("2Y", 2), ("3Y", 3), ("5Y", 5),
+    # Range-preset UI + a special "Zoom" preset that focuses only on the
+    # forecast band with a tight y-axis, so many-model comparisons are readable.
+    # 'zoom' is treated as a special sentinel value in the state.
+    RANGES = [("Zoom", "zoom"), ("1Y", 1), ("2Y", 2), ("3Y", 3), ("5Y", 5),
               ("10Y", 10), ("20Y", 20), ("All", None)]
     if "range_years" not in st.session_state:
         st.session_state["range_years"] = 5    # sensible default
 
-    r_cols = st.columns([1] * len(RANGES) + [6])
-    for (label, yrs), col in zip(RANGES, r_cols[:-1]):
+    r_cols = st.columns([1] * len(RANGES) + [4, 3])
+    for (label, yrs), col in zip(RANGES, r_cols[:-2]):
         active = st.session_state["range_years"] == yrs
         if col.button(label, key=f"rng_{label}",
                       use_container_width=True,
                       type=("primary" if active else "secondary")):
             st.session_state["range_years"] = yrs
 
+    # Legend-position toggle — helps a lot when there are 8+ models.
+    with r_cols[-2]:
+        legend_mode = st.selectbox(
+            "Labels",
+            ["Inline (right)", "Legend (top)", "Off"],
+            index=0 if len(chosen) > 6 else 1,
+            key="legend_mode",
+            label_visibility="collapsed",
+        )
+    with r_cols[-1]:
+        # A convenience note replaced the old caption-below-chart
+        st.caption(f"{len(chosen)} model{'s' if len(chosen) != 1 else ''} selected")
+
     yrs = st.session_state["range_years"]
-    if yrs is None:
+    zoom_mode = (yrs == "zoom")
+
+    # Fit models first — we need the forecast values to compute the zoom range.
+    fc_rows = []
+    fc_paths = {}   # key -> np.ndarray of forecast values
+    with st.spinner("Fitting selected models…"):
+        for k in chosen:
+            try:
+                m = fit_model(freq, infl_key, k)
+                path = forecast_path(m, horizon)
+                fc_paths[k] = path
+                fc_rows.append((infos[k].name, infos[k].family, path[0], path[-1]))
+            except Exception as e:
+                st.warning(f"{infos[k].name} failed: {e}")
+
+    # Determine the x-range and y-range for the view.
+    if zoom_mode:
+        # Focus on the forecast band + a short lead-in of history.
+        lead_in = pd.DateOffset(months=6 if freq == "M" else 3)
+        view_start = last_date - lead_in
+        view_end = fc_dates[-1] + pd.DateOffset(months=1 if freq == "M" else 3)
+        # Auto-fit y: use only the forecast values + last realized as reference.
+        y_vals = [last_val]
+        for path in fc_paths.values():
+            y_vals.extend(path.tolist())
+        if y_vals:
+            y_lo, y_hi = min(y_vals), max(y_vals)
+            span = max(0.5, y_hi - y_lo)
+            y_range = [y_lo - 0.15 * span, y_hi + 0.15 * span]
+        else:
+            y_range = None
+    elif yrs is None:
         view_start = y.index[0]
+        view_end = fc_dates[-1] + pd.DateOffset(months=1 if freq == "M" else 3)
+        y_range = None
     else:
         view_start = max(y.index[0], last_date - pd.DateOffset(years=yrs))
-    view_end = fc_dates[-1] + pd.DateOffset(months=1 if freq == "M" else 3)
+        view_end = fc_dates[-1] + pd.DateOffset(months=1 if freq == "M" else 3)
+        y_range = None
 
     fig = go.Figure()
 
-    # Realized inflation
-    fig.add_trace(go.Scatter(
-        x=y.index, y=y.values, name="Realized inflation",
-        line=dict(color=COLORS["realized"], width=2.5),
-        hovertemplate="%{x|%b %Y}<br><b>%{y:.2f}%</b><extra>Realized</extra>",
-    ))
+    # Realized inflation (skip in zoom mode — only draw the last point as a marker).
+    if zoom_mode:
+        fig.add_trace(go.Scatter(
+            x=[last_date], y=[last_val], name="Latest realized",
+            mode="markers",
+            marker=dict(color=COLORS["realized"], size=9,
+                        line=dict(color="white" if not DARK else "#0f172a", width=1.5)),
+            showlegend=(legend_mode == "Legend (top)"),
+            hovertemplate="%{x|%b %Y}<br><b>%{y:.2f}%</b><extra>Realized</extra>",
+        ))
+    else:
+        fig.add_trace(go.Scatter(
+            x=y.index, y=y.values, name="Realized",
+            line=dict(color=COLORS["realized"], width=2.5),
+            showlegend=(legend_mode == "Legend (top)"),
+            hovertemplate="%{x|%b %Y}<br><b>%{y:.2f}%</b><extra>Realized</extra>",
+        ))
 
     # Shaded forecast band + vertical "now" marker
     fig.add_vrect(x0=last_date, x1=fc_dates[-1], fillcolor=COLORS["band"],
@@ -279,56 +338,86 @@ with tab_overview:
     fig.add_vline(x=last_date,
                   line=dict(color=COLORS["muted"], width=1, dash="dot"))
 
-    fc_rows = []
-    with st.spinner("Fitting selected models…"):
-        for k in chosen:
-            try:
-                m = fit_model(freq, infl_key, k)
-                path = forecast_path(m, horizon)
-                fc_rows.append((infos[k].name, infos[k].family, path[0], path[-1]))
-                color = color_for(k, infos[k].family, chosen)
-                fig.add_trace(go.Scatter(
-                    x=[last_date] + fc_dates,
-                    y=[last_val] + list(path),
-                    name=infos[k].name, mode="lines",
-                    line=dict(color=color, width=2, dash="dot"),
-                    hovertemplate=(f"%{{x|%b %Y}}<br><b>%{{y:.2f}}%</b>"
-                                   f"<extra>{infos[k].name}</extra>"),
-                ))
-            except Exception as e:
-                st.warning(f"{infos[k].name} failed: {e}")
-
-    # "forecast" text over the shaded region
-    fig.add_annotation(
-        x=fc_dates[len(fc_dates) // 2], y=1, yref="paper",
-        text="forecast horizon", showarrow=False,
-        font=dict(color=COLORS["muted"], size=11), yshift=8,
+    # End-of-line label positions in Inline mode. To reduce collisions when
+    # forecasts endpoints stack up, we jitter labels vertically in y-order.
+    endpoints = sorted(
+        ((k, fc_paths[k][-1]) for k in fc_paths),
+        key=lambda x: -x[1],  # top to bottom
     )
+    for k in fc_paths:
+        path = fc_paths[k]
+        color = color_for(k, infos[k].family, chosen)
+        show_in_legend = (legend_mode == "Legend (top)")
+        # Draw the forecast line
+        fig.add_trace(go.Scatter(
+            x=[last_date] + fc_dates,
+            y=[last_val] + list(path),
+            name=infos[k].name, mode="lines",
+            line=dict(color=color, width=2.2 if len(chosen) <= 4 else 1.8,
+                      dash="dot"),
+            showlegend=show_in_legend,
+            hovertemplate=(f"%{{x|%b %Y}}<br><b>%{{y:.2f}}%</b>"
+                           f"<extra>{infos[k].name}</extra>"),
+        ))
+        # Inline label at the endpoint
+        if legend_mode == "Inline (right)":
+            fig.add_annotation(
+                x=fc_dates[-1], y=path[-1],
+                text=f"  {infos[k].name}",
+                showarrow=False, xanchor="left", yanchor="middle",
+                font=dict(color=color, size=11),
+                bgcolor="rgba(0,0,0,0)",
+            )
+
+    # "forecast" text over the shaded region (skip in zoom mode; the label
+    # would overlap with the end-of-line names).
+    if not zoom_mode:
+        fig.add_annotation(
+            x=fc_dates[len(fc_dates) // 2], y=1, yref="paper",
+            text="forecast horizon", showarrow=False,
+            font=dict(color=COLORS["muted"], size=11), yshift=8,
+        )
 
     fig.update_layout(**CHART_LAYOUT)
+
+    # In Inline mode we need extra right-margin space so the endpoint labels
+    # aren't clipped. Amount depends on the longest model name.
+    inline_pad = 0
+    if legend_mode == "Inline (right)":
+        max_name = max((len(infos[k].name) for k in fc_paths), default=0)
+        inline_pad = min(240, 60 + int(max_name * 6.2))
+
     fig.update_layout(
-        height=460,
-        margin=dict(t=30, b=40, l=10, r=20),
+        height=520 if zoom_mode else 460,
+        margin=dict(t=30, b=40, l=10, r=20 + inline_pad),
         xaxis=dict(**CHART_LAYOUT["xaxis"], type="date",
                    range=[view_start, view_end]),
         yaxis=dict(**CHART_LAYOUT["yaxis"],
                    title=dict(text="Annualized inflation",
                               standoff=8,
-                              font=dict(color=COLORS["ink"]))),
+                              font=dict(color=COLORS["ink"])),
+                   range=y_range),
     )
+    # In "Off" mode kill the legend entirely; in "Legend (top)" the horizontal
+    # legend from CHART_LAYOUT already handles it.
+    if legend_mode == "Off":
+        fig.update_layout(showlegend=False)
+    elif legend_mode == "Inline (right)":
+        fig.update_layout(showlegend=False)
 
-    # Use a native Streamlit heading instead of Plotly's title, so it picks up
-    # the same font/color as the rest of the page (light OR dark theme).
     st.markdown(
         f"#### {labels.get(infl_key, infl_key)} — realized and forecast"
     )
     st.plotly_chart(fig, use_container_width=True,
                     config={"displayModeBar": False})
+    _caption_prefix = "Zoomed to forecast band. " if zoom_mode else \
+                       f"Solid line: realized {labels.get(infl_key, infl_key)}. "
     st.caption(
-        f"Solid line: realized {labels.get(infl_key, infl_key)}. Dotted lines: each "
-        f"model's forecast path from now to {horizon} periods ahead. Use the range "
-        f"buttons above the chart to zoom in and out. Colors: grey = benchmark, "
-        f"blue = statistical, red = structural."
+        f"{_caption_prefix}Dotted lines: each model's forecast path from now to "
+        f"{horizon} periods ahead. **Zoom** focuses on the forecast band with a "
+        "tight y-axis — best for comparing many models. **Labels** toggles between "
+        "inline end-of-line names, a legend, or off. Colors: grey = benchmark, "
+        "blue = statistical, red = structural."
     )
 
     # --- Forecast summary table ---
