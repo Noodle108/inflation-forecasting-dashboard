@@ -202,4 +202,19 @@ def load_data(freq: str = "M", start: str = DEFAULT_START) -> MacroData:
         window = 60 if freq == "M" else 20
         activity["ngap"] = unrate - unrate.rolling(window, min_periods=12).mean()
 
+    # Long-run expected inflation from the Cleveland Fed term-structure model.
+    # This is the anchor Phillips-curve gap models converge to.
+    exp10 = _fetch_fred_series("EXPINF10YR", start)
+    if exp10 is not None:
+        if freq == "Q":
+            exp10 = exp10.resample("QS").mean()
+        activity["exp10yr"] = exp10
+
+    # Short-run inflation expectations (1y) for models that want a nearer anchor.
+    exp1 = _fetch_fred_series("EXPINF1YR", start)
+    if exp1 is not None:
+        if freq == "Q":
+            exp1 = exp1.resample("QS").mean()
+        activity["exp1yr"] = exp1
+
     return MacroData(inflation=inflation, activity=activity.dropna(how="all"), freq=freq)

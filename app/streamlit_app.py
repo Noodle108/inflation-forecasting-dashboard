@@ -384,6 +384,44 @@ with tab_overview:
                     except Exception:
                         pass
 
+                # Long-run anchor / steady state — shown for every model. Helps
+                # answer the "why is my forecast flat?" question by making the
+                # implied long-run destination explicit.
+                try:
+                    m = fit_model(freq, infl_key, k)
+                    ss = None
+                    if hasattr(m, "steady_state"):
+                        try:
+                            ss = float(m.steady_state())
+                        except Exception:
+                            ss = None
+                    if ss is None or not np.isfinite(ss):
+                        # As a fallback, use forecast at a very long horizon.
+                        try:
+                            long_h = 60 if freq == "M" else 20
+                            ss = float(m.forecast(long_h))
+                        except Exception:
+                            ss = None
+                    anchor = None
+                    anchor_source = None
+                    if hasattr(m, "_last_anchor"):
+                        anchor = float(m._last_anchor)
+                        anchor_source = "EXPINF10YR (Cleveland Fed 10y)"
+                    elif hasattr(m, "_trend"):
+                        anchor = float(m._trend)
+                        anchor_source = getattr(m, "_anchor_source",
+                                                "estimated trend τ_T")
+                    if ss is not None or anchor is not None:
+                        parts = []
+                        if ss is not None:
+                            parts.append(f"long-run forecast → **{ss:.2f}%**")
+                        if anchor is not None:
+                            parts.append(f"anchor τ_T = **{anchor:.2f}%**"
+                                         + (f" ({anchor_source})" if anchor_source else ""))
+                        st.info("**Where this model is heading**: " + " · ".join(parts))
+                except Exception:
+                    pass
+
                 # Read new fields from EXTRAS directly (belt-and-braces in case
                 # Streamlit Cloud has cached a pre-extras ModelInfo class).
                 ex = model_extras(k)

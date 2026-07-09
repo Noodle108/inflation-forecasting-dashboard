@@ -36,60 +36,91 @@ class NewKeynesianPC(ForecastModel):
         key="nkpc",
         name="New Keynesian Phillips Curve (semi-structural)",
         family="Structural",
-        reference="Galí–Gertler (1999)",
+        reference="Galí–Gertler (1999); Bernanke–Blanchard (2023) anchoring",
         description=(
-            "A hybrid New Keynesian Phillips curve: inflation is driven by lagged "
-            "inflation and the output gap (from the unemployment gap via Okun's law), "
-            "with the gap following an estimated AR process so the system can be "
-            "iterated forward. A transparent, lightweight structural forecast."
+            "A hybrid New Keynesian Phillips curve estimated in **expectation-gap form**: "
+            "(π − π^LR) is regressed on its own lag and the output gap, so that in the "
+            "absence of shocks inflation converges to long-run expected inflation π^LR "
+            "(Cleveland Fed EXPINF10YR when available; sample mean as fallback). Follows "
+            "Bernanke–Blanchard (2023) in imposing the long-run anchor explicitly rather "
+            "than letting the unconditional mean of the fitted regression set it."
         ),
         needs_activity=True,
         citation="Galí, J. & Gertler, M. (1999), 'Inflation Dynamics: A Structural Econometric Analysis', JME.",
-        intuition="Firms set prices partly on where they expect inflation to go and partly on how hot the economy is (the output gap).",
-        unique="A single structural equation linking inflation to the output gap — the theoretical backbone that the full DSGE embeds inside a complete model.",
-        strengths="Interpretable and cheap; makes the inflation–gap trade-off explicit without a full general-equilibrium solve.",
-        caveats="Not a complete equilibrium model: expectations and the gap are handled by reduced-form proxies rather than solved jointly.",
-        forecast_shape="A mean-reverting path pulled by the estimated output gap and inflation persistence.",
+        intuition="Firms set prices partly on where they expect inflation to go (anchor) and partly on how hot the economy is (the output gap). Written so the anchor is π^LR from surveys.",
+        unique="A single structural equation linking inflation to the output gap, with a hard long-run anchor — the theoretical backbone the full DSGE embeds.",
+        strengths="Interpretable and cheap; makes the inflation–gap trade-off explicit; forecast converges to survey-based expectations rather than to the sample mean.",
+        caveats="Not a complete equilibrium model: expectations and the gap are still reduced-form. The κ slope is famously flat in post-1985 data.",
+        forecast_shape="A mean-reverting path pulled toward π^LR (currently ~2.5% from Cleveland Fed) at a speed set by the persistence coefficient b.",
     )
 
-    def __init__(self, okun: float = -2.0, activity_col: str = "ngap"):
-        super().__init__(okun=okun, activity_col=activity_col)
+    def __init__(self, okun: float = -2.0, activity_col: str = "ngap",
+                 anchor_col: str = "exp10yr"):
+        super().__init__(okun=okun, activity_col=activity_col,
+                         anchor_col=anchor_col)
         self.okun = okun
         self.activity_col = activity_col
+        self.anchor_col = anchor_col
 
     def _fit(self) -> None:
         import statsmodels.api as sm
 
         pi = self._y
-        if self._X is not None and self.activity_col in getattr(self._X, "columns", []):
-            ugap = self._X[self.activity_col].reindex(pi.index).ffill()
+        Xdf = self._X if self._X is not None else pd.DataFrame(index=pi.index)
+
+        # Long-run anchor π^LR: Cleveland Fed EXPINF10YR if present, else sample mean.
+        if self.anchor_col in getattr(Xdf, "columns", []):
+            anchor = Xdf[self.anchor_col].reindex(pi.index).ffill().bfill()
+        else:
+            anchor = pd.Series(float(pi.mean()), index=pi.index)
+        self._anchor = anchor
+        self._last_anchor = float(anchor.iloc[-1])
+
+        # Output gap (from unemployment gap via Okun's law).
+        if self.activity_col in getattr(Xdf, "columns", []):
+            ugap = Xdf[self.activity_col].reindex(pi.index).ffill()
         else:
             ugap = pd.Series(0.0, index=pi.index)
         gap = self.okun * ugap
 
-        df = pd.DataFrame({"pi": pi, "gap": gap}).dropna()
-        df["pi_l1"] = df["pi"].shift(1)
-        df["gap_l1"] = df["gap"].shift(1)
-        d = df.dropna()
+        # Expectation-gap form: (π - π^LR) = c + b (π_{t-1} - π^LR) + κ · gap + ε.
+        # The constant absorbs any small mean deviation; b < 1 gives dynamic
+        # convergence to π^LR in the no-shock forecast.
+        df = pd.DataFrame({
+            "pi_gap": pi - anchor,
+            "pi_gap_l1": (pi - anchor).shift(1),
+            "gap": gap,
+            "gap_l1": gap.shift(1),
+        }).dropna()
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            Xp = sm.add_constant(d[["pi_l1", "gap"]].values)
-            self._nkpc = sm.OLS(d["pi"].values, Xp).fit()
-            Xg = sm.add_constant(d["gap_l1"].values)
-            self._gap_ar = sm.OLS(d["gap"].values, Xg).fit()
+            Xp = sm.add_constant(df[["pi_gap_l1", "gap"]].values)
+            self._nkpc = sm.OLS(df["pi_gap"].values, Xp).fit()
+            Xg = sm.add_constant(df["gap_l1"].values)
+            self._gap_ar = sm.OLS(df["gap"].values, Xg).fit()
 
-        self._last_pi = float(d["pi"].iloc[-1])
-        self._last_gap = float(d["gap"].iloc[-1])
+        self._last_pi_gap = float(df["pi_gap"].iloc[-1])
+        self._last_gap = float(df["gap"].iloc[-1])
 
     def _forecast(self, h: int) -> float:
         c_pi, b_pi, k_pi = self._nkpc.params
         c_g, rho_g = self._gap_ar.params
-        pi, gap = self._last_pi, self._last_gap
+        pi_gap, gap = self._last_pi_gap, self._last_gap
         for _ in range(h):
             gap = c_g + rho_g * gap
-            pi = c_pi + b_pi * pi + k_pi * gap
-        return float(pi)
+            pi_gap = c_pi + b_pi * pi_gap + k_pi * gap
+        return float(self._last_anchor + pi_gap)
+
+    def steady_state(self) -> float:
+        """Long-run forecast the model converges to (anchor + implied gap-steady-state)."""
+        c_pi, b_pi, k_pi = self._nkpc.params
+        c_g, rho_g = self._gap_ar.params
+        if abs(rho_g) >= 1 or abs(b_pi) >= 1:
+            return float("nan")
+        gap_ss = c_g / (1 - rho_g)
+        pi_gap_ss = (c_pi + k_pi * gap_ss) / (1 - b_pi)
+        return float(self._last_anchor + pi_gap_ss)
 
 
 # =========================================================================== #
