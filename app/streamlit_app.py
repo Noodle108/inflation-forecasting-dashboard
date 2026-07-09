@@ -470,7 +470,7 @@ Repeat across many origins and score the resulting forecast errors.
         """
     )
 
-    c1, c2 = st.columns([2, 1])
+    c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
         min_train = st.slider(
             "Minimum training window (periods)",
@@ -484,12 +484,22 @@ Repeat across many origins and score the resulting forecast errors.
             "Origin step (periods)", [1, 3, 6, 12], index=1,
             help="Space between successive re-fits. Bigger = faster backtest.",
         )
+    with c3:
+        _cpu = max(1, (os.cpu_count() or 2))
+        _worker_options = sorted(set([1, 2, 4, min(8, _cpu)]))
+        bt_workers = st.selectbox(
+            "Parallel workers", _worker_options,
+            index=min(len(_worker_options) - 1, 2),
+            help=f"Distribute origins across processes. Detected {_cpu} CPUs.",
+        )
 
     est_n = max(0, (len(y) - min_train - horizon) // step + 1)
     st.caption(
         f"Plan: **{est_n}** origins × **{max(1, len(chosen))}** models = "
-        f"~{est_n * max(1, len(chosen))} model-fits. Slow models (UCSV-SV, DSGE, SW07, "
-        f"NY Fed, SW-DFM, TVP-VAR) can each add several seconds per origin."
+        f"~{est_n * max(1, len(chosen))} model-fits, distributed across "
+        f"**{bt_workers}** worker{'s' if bt_workers != 1 else ''}. "
+        "Slow models (UCSV-SV, DSGE, SW07, NY Fed, SW-DFM, TVP-VAR) add "
+        "several seconds per origin — parallelizing them wins the most."
     )
     run = st.button("Run backtest", type="primary")
 
@@ -503,6 +513,7 @@ Repeat across many origins and score the resulting forecast errors.
             res = run_backtest(
                 y, X, keys, horizon=horizon, scheme="expanding",
                 min_train=min_train, step=step,
+                n_workers=bt_workers,
                 progress=lambda p: bar.progress(p, text="Backtesting…"),
             )
             bar.empty()

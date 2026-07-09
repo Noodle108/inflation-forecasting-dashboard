@@ -5,9 +5,19 @@ origin using only data available up to that point, forecast h steps ahead, and s
 against the realized value. Reports RMSE / MAE and the **relative RMSE** vs. the
 benchmark (the standard way this literature reports results — a value < 1 means the
 model beats the random walk).
+
+Parallelism
+-----------
+When ``n_workers > 1`` (the default picks ``min(8, cpu_count - 1)``), origins are
+distributed across a ``concurrent.futures.ProcessPoolExecutor``. Each worker
+process keeps its own FRED / derived-panel caches in memory, so subsequent
+origins on the same worker reuse the cached data. Same trick as the FW horse
+race — see ``src/evaluation/fw_horserace.py``.
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -50,6 +60,18 @@ def _fit_and_forecast(key, y_train, X_train, h) -> Optional[float]:
         return np.nan
 
 
+def _origin_task(args):
+    """Worker function: fit all keys on one training window at one horizon.
+
+    Runs in a separate process. Returns a dict {key: forecast}.
+    """
+    y_train, X, model_keys, horizon = args
+    out = {}
+    for k in model_keys:
+        out[k] = _fit_and_forecast(k, y_train, X, horizon)
+    return out
+
+
 def run_backtest(
     y: pd.Series,
     X: Optional[pd.DataFrame],
@@ -60,38 +82,71 @@ def run_backtest(
     rolling_window: int = 240,
     step: int = 1,
     benchmark_key: str = registry.BENCHMARK_KEY,
+    n_workers: int | None = None,
     progress=None,
 ) -> BacktestResult:
-    """Backtest `model_keys` on inflation `y` (+ activity `X`) at a single horizon."""
+    """Backtest `model_keys` on inflation `y` (+ activity `X`) at a single horizon.
+
+    When ``n_workers > 1`` origins are distributed across a process pool. Pass 1
+    to force serial (useful for debugging or when the pool overhead exceeds
+    the fit time).
+    """
     y = y.astype(float).dropna()
     idx = y.index
     n = len(y)
 
     origins = list(range(min_train, n - horizon, step))
-    fc = {k: [] for k in model_keys}
+    fc = {k: [None] * len(origins) for k in model_keys}
     realized, origin_dates, target_dates = [], [], []
 
-    total = len(origins)
+    if n_workers is None:
+        n_workers = max(1, min(8, (os.cpu_count() or 2) - 1))
+
+    # Pre-compute origin-level bookkeeping (realized, dates) — needs no worker.
+    tasks = []
     for i, t in enumerate(origins):
         if scheme == "rolling":
             start = max(0, t - rolling_window)
         else:
             start = 0
         y_train = y.iloc[start:t]
-        # pass full X; models align it to y_train's dates by label (trailing only,
-        # so there is no look-ahead). Positional slicing would misalign the indices.
-        X_train = X if X is not None else None
-
-        for k in model_keys:
-            fc[k].append(_fit_and_forecast(k, y_train, X_train, horizon))
-
         target_i = t + horizon - 1
         realized.append(float(y.iloc[target_i]))
         origin_dates.append(idx[t])
         target_dates.append(idx[target_i])
+        tasks.append((i, y_train))
 
-        if progress is not None and total:
-            progress((i + 1) / total)
+    total = len(origins)
+
+    def _record(i, per_key):
+        for k, v in per_key.items():
+            fc[k][i] = v
+
+    if n_workers <= 1:
+        # Serial path — same code, no process overhead.
+        for done, (i, y_train) in enumerate(tasks, start=1):
+            per_key = _origin_task((y_train, X, model_keys, horizon))
+            _record(i, per_key)
+            if progress is not None:
+                progress(done / total)
+    else:
+        futures = {}
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            for (i, y_train) in tasks:
+                fut = pool.submit(_origin_task,
+                                  (y_train, X, model_keys, horizon))
+                futures[fut] = i
+            done = 0
+            for fut in as_completed(futures):
+                i = futures[fut]
+                try:
+                    per_key = fut.result()
+                except Exception:
+                    per_key = {k: float("nan") for k in model_keys}
+                _record(i, per_key)
+                done += 1
+                if progress is not None:
+                    progress(done / total)
 
     forecasts = pd.DataFrame(fc, index=pd.Index(origin_dates, name="origin"))
     realized_s = pd.Series(realized, index=forecasts.index, name="realized")
