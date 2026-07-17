@@ -96,6 +96,40 @@ _SPF_SHEET = {
 }
 
 
+@lru_cache(maxsize=2)
+def load_spf_cpi10() -> Optional[pd.Series]:
+    """SPF 10-year-ahead CPI inflation forecast (annualized %).
+
+    Quarterly consensus mean from the Philly Fed SPF (sheet ``CPI10``, one column
+    of the same name). Available since 1991Q4. Serves as a Blue-Chip 5–10y CPI
+    stand-in for Faust–Wright's local-mean trend τ_t — same object (a
+    professional-forecaster long-horizon anchor), higher data quality than the
+    5-yr Michigan/EXPINF surrogate, and free.
+
+    Returned as a Series indexed by the survey origin quarter (quarter start).
+    """
+    path = _spf_path()
+    if path is None:
+        return None
+    try:
+        xf = _open_xlsx_forgiving(path)
+        if "CPI10" not in xf.sheet_names:
+            return None
+        df = xf.parse("CPI10")
+    except Exception:
+        return None
+    if not {"YEAR", "QUARTER", "CPI10"}.issubset(df.columns):
+        return None
+    df = df.dropna(subset=["CPI10"])
+    origin = pd.PeriodIndex.from_fields(
+        year=df["YEAR"].astype(int),
+        quarter=df["QUARTER"].astype(int),
+        freq="Q",
+    ).to_timestamp(how="start")
+    return pd.Series(pd.to_numeric(df["CPI10"], errors="coerce").values,
+                     index=origin, name="spf_cpi10").sort_index().dropna()
+
+
 @lru_cache(maxsize=8)
 def load_spf(series: str = "cpi") -> Optional[pd.DataFrame]:
     """Return SPF quarterly mean forecasts for ``series`` as a wide DataFrame

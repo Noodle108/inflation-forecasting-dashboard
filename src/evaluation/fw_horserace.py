@@ -73,12 +73,20 @@ def run_fw_horserace(
     step: int = 1,
     n_workers: int | None = None,
     progress=None,
+    training_by_origin: Optional[dict] = None,
 ) -> FWResult:
     """Score `model_keys` at every h in `horizons` on inflation series `y`.
 
     Each model fits once per origin. For h=0 (nowcast) we use `y_train.iloc[-1]`
     as a naive nowcast reference. Non-zero horizons use forecast(h). Origins
     iterate from `min_train` to `len(y) - max(horizons) - 1`.
+
+    Real-time / vintage mode: pass ``training_by_origin`` = a dict keyed by
+    origin timestamp with values ``(y_train, X_train)``. When set, models fit
+    on the vintage-appropriate series for that origin instead of ``y.iloc[:t]``
+    / ``X.iloc[:t]``. Realized targets always come from the current-vintage
+    ``y`` (that IS the final revised value, which is what we score against —
+    same convention Faust–Wright use).
 
     Parallelism: when ``n_workers`` is None (default), pick a sensible size
     based on cpu_count. Pass 1 to run serially.
@@ -101,8 +109,13 @@ def run_fw_horserace(
         for h in horizons:
             idx = t if h == 0 else t + h - 1
             realized[h].append(float(y.iloc[idx]) if idx < n_obs else float("nan"))
-        origin_dates.append(y.index[t])
-        tasks.append((i, y.iloc[:t]))
+        origin_ts = y.index[t]
+        origin_dates.append(origin_ts)
+        if training_by_origin is not None and origin_ts in training_by_origin:
+            y_train, X_train = training_by_origin[origin_ts]
+        else:
+            y_train, X_train = y.iloc[:t], X
+        tasks.append((i, y_train, X_train))
 
     total = len(origins)
 
@@ -113,8 +126,8 @@ def run_fw_horserace(
 
     if n_workers <= 1:
         # Serial path — same code, no process overhead. Useful for debugging.
-        for done, (i, y_train) in enumerate(tasks, start=1):
-            per_key = _origin_task((y_train, X, model_keys, horizons))
+        for done, (i, y_train, X_train) in enumerate(tasks, start=1):
+            per_key = _origin_task((y_train, X_train, model_keys, horizons))
             _record(i, per_key)
             if progress is not None:
                 progress(done / total)
@@ -124,8 +137,9 @@ def run_fw_horserace(
         # origins on the same worker are much cheaper than the first.
         futures = {}
         with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            for (i, y_train) in tasks:
-                fut = pool.submit(_origin_task, (y_train, X, model_keys, horizons))
+            for (i, y_train, X_train) in tasks:
+                fut = pool.submit(_origin_task,
+                                  (y_train, X_train, model_keys, horizons))
                 futures[fut] = i
             done = 0
             for fut in as_completed(futures):

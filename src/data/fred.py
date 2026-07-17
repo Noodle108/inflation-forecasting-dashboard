@@ -105,6 +105,72 @@ def _fetch_fred_series(fred_id: str, start: str) -> Optional[pd.Series]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# ALFRED (real-time / vintage) access
+# ---------------------------------------------------------------------------
+_ALFRED_CACHE_DIR = PROJECT_ROOT / "data" / "alfred"
+_ALFRED_MEM: dict[str, pd.DataFrame] = {}
+
+
+def _fetch_alfred_all_releases(fred_id: str) -> Optional[pd.DataFrame]:
+    """Return every ALFRED release row for ``fred_id``: (realtime_start, date, value).
+
+    Cached on disk under ``data/alfred/<fred_id>.parquet`` so repeated runs don't
+    re-hit FRED. Values are kept in their raw units (levels), same as the FRED
+    published series. Rows with ``value = NaT`` (ALFRED's marker for "no
+    observation reported in that vintage") are dropped.
+    """
+    if fred_id in _ALFRED_MEM:
+        return _ALFRED_MEM[fred_id]
+    _ALFRED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache = _ALFRED_CACHE_DIR / f"{fred_id}.parquet"
+    if cache.exists():
+        df = pd.read_parquet(cache)
+    else:
+        client = _fred_client()
+        if client is None:
+            return None
+        try:
+            df = client.get_series_all_releases(fred_id)
+        except Exception:
+            return None
+        df["realtime_start"] = pd.to_datetime(df["realtime_start"])
+        df["date"] = pd.to_datetime(df["date"])
+        # Filter out NaT-value rows; keep dtype float
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df = df.dropna(subset=["value"])
+        df.to_parquet(cache)
+    _ALFRED_MEM[fred_id] = df
+    return df
+
+
+def fetch_vintage_series(fred_id: str, as_of: pd.Timestamp,
+                         fallback_start: str = "1960-01-01") -> Optional[pd.Series]:
+    """Return ``fred_id`` as it was known on ``as_of``.
+
+    For each observation date, uses the *latest* revision released on or before
+    ``as_of``. If the series has no ALFRED history before ``as_of`` (e.g. GDPDEF
+    before 1991-12), falls back to the current-vintage series (with observations
+    beyond ``as_of`` clipped so we still can't peek at future data).
+    """
+    df = _fetch_alfred_all_releases(fred_id)
+    if df is None or df.empty:
+        return None
+    v = df[df["realtime_start"] <= pd.Timestamp(as_of)]
+    if v.empty:
+        latest = _fetch_fred_series(fred_id, fallback_start)
+        if latest is None:
+            return None
+        return latest[latest.index <= pd.Timestamp(as_of)]
+    # Latest revision per observation date, as of `as_of`.
+    v = v.sort_values("realtime_start").drop_duplicates("date", keep="last")
+    s = pd.Series(v["value"].values, index=v["date"]).sort_index()
+    # An observation only appears in ALFRED after it was first released; nothing
+    # beyond as_of is knowable. This filter is redundant given the realtime_start
+    # cut but makes the invariant explicit.
+    return s[s.index <= pd.Timestamp(as_of)]
+
+
 def to_inflation(level: pd.Series, freq: str) -> pd.Series:
     """Annualized log-difference inflation from a price *level* series."""
     factor = _ANNUALIZE[freq]

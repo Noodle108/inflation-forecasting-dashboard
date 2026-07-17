@@ -2,6 +2,13 @@
 
 Runs the same horse race on GDP-deflator inflation over FW's own sample window
 (1985Q1-2011Q4), then prints our rel-RMSPE next to the published values.
+
+Flags:
+    --short     Skip the ~2s/fit DSGE models and use a smaller horizon set.
+    --alfred    Use vintage GDPDEF + UNRATE from ALFRED at each origin (real-time
+                training data, matching FW's own construction). Falls back to
+                current-vintage series for origins before ALFRED coverage
+                (GDPDEF earliest vintage = 1991-12).
 """
 from __future__ import annotations
 
@@ -58,7 +65,42 @@ def load_gdpdef_quarterly() -> tuple[pd.Series, pd.DataFrame | None]:
     return pi, X
 
 
-def main(short: bool = False) -> None:
+def _pi_from_level(lvl: pd.Series) -> pd.Series:
+    """Quarterly annualized log-diff inflation from a monthly-or-quarterly level."""
+    lvl_q = lvl.resample("QS").mean()
+    return 400.0 * np.log(lvl_q / lvl_q.shift(1)).dropna()
+
+
+def build_vintage_training(origins: pd.DatetimeIndex) -> dict:
+    """For each origin, build the (y_train, X_train) pair from ALFRED as it was
+    known at that origin date.
+
+    Vintage for a Q_t origin = the latest release with realtime_start <= Q_t.
+    If ALFRED has no coverage before ``origin`` (GDPDEF only starts 1991-12),
+    ``fetch_vintage_series`` returns the current-vintage series clipped to that
+    date instead — imperfect, but the best available approximation.
+    """
+    out = {}
+    for origin in origins:
+        # Vintage series known "on the morning of `origin`" — the model would
+        # then forecast at horizon h >= 1 into future quarters.
+        p_lvl = fred_mod.fetch_vintage_series("GDPDEF", origin)
+        u_lvl = fred_mod.fetch_vintage_series("UNRATE", origin)
+        if p_lvl is None or u_lvl is None:
+            continue
+        pi = _pi_from_level(p_lvl)
+        # UNRATE is monthly; the horse race passes activity as-is (each model
+        # aligns internally). Resample to Q to keep with pi's cadence.
+        u_q = u_lvl.resample("QS").mean()
+        # Clip both to strictly-before-origin so nothing peeks at future data.
+        pi = pi[pi.index < origin]
+        u_q = u_q[u_q.index < origin]
+        X = pd.DataFrame({"unrate": u_q})
+        out[pd.Timestamp(origin)] = (pi, X)
+    return out
+
+
+def main(short: bool = False, alfred: bool = False) -> None:
     pi, X = load_gdpdef_quarterly()
     # FW's evaluation sample: origins are 1985Q1..2011Q4 (inflation from 1960 onward)
     end = pd.Timestamp("2011-12-31")
@@ -78,11 +120,25 @@ def main(short: bool = False) -> None:
     min_train = int((pi.index < first_target).sum())
     print(f"min_train={min_train} → first origin ≈ {pi.index[min_train].date()}")
 
+    training_by_origin = None
+    if alfred:
+        origins = pi.index[min_train:len(pi) - max(horizons)]
+        print(f"Building ALFRED vintage training set over {len(origins)} origins…")
+        training_by_origin = build_vintage_training(origins)
+        # Report ALFRED coverage
+        vintage_hits = sum(
+            1 for o in origins
+            if o in training_by_origin
+            and training_by_origin[o][0].index[-1] >= pd.Timestamp("1991-01-01")
+        )
+        print(f"  ALFRED-native origins (post-1991-12 vintages): {vintage_hits}/{len(origins)}")
+
     res = run_fw_horserace(
         pi, X, keys, horizons,
         benchmark_key="fw_fixedrho",
         min_train=min_train, step=1,
         n_workers=6,
+        training_by_origin=training_by_origin,
     )
 
     ours = res.rel_rmspe.reindex(keys)
@@ -111,4 +167,4 @@ def main(short: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    main(short="--short" in sys.argv)
+    main(short="--short" in sys.argv, alfred="--alfred" in sys.argv)

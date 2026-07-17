@@ -5,12 +5,19 @@ forecast is written in "gap" form (g_t = π_t − τ_t). Their preferred τ_t is
 recent Blue-Chip 5–10y long-run inflation forecast (available from 1979); pre-1979
 they fall back to exponential smoothing (α = 0.95) of realized inflation (footnote 8).
 
-Blue-Chip is not on FRED, so we anchor τ_t on the Cleveland Fed 10-year expected
-inflation series (`EXPINF10YR`, Haubrich-Pennacchi-Ritchken 2012) once available
-(~1982), and fall back to FW's own exponential-smoothing formula
-    τ_t = α τ_{t-1} + (1 − α) π_t,     α = 0.95
-for earlier dates. Both series are annualized percent, same units as our π_t, so no
-scaling is needed.
+Blue-Chip is subscription-only. We build τ_t from three ordered fallbacks:
+
+    1. **SPF 10-year CPI** (Philly Fed sheet ``CPI10``, 1991Q4→). Same object as
+       Blue Chip — a quarterly consensus of professional forecasters at a 5–10y
+       long horizon — just published by the Philly Fed rather than Wolters Kluwer.
+       This is the standard academic replacement when Blue Chip isn't available.
+    2. **Cleveland Fed 10-yr expected inflation** (FRED ``EXPINF10YR``, 1982→).
+       Model-based (Haubrich–Pennacchi–Ritchken 2012) — used when SPF is missing.
+    3. **FW's exponential-smoothing fallback** (footnote 8):
+           τ_t = α τ_{t-1} + (1 − α) π_t,     α = 0.95
+       Used for dates before both survey/model anchors are available.
+
+All three anchors are annualized percent — same units as π_t, no scaling needed.
 
 Also collected here: BIC lag selection for AR-GAP, and a tiny direct h-step OLS helper
 that most FW models share.
@@ -26,23 +33,36 @@ FIXED_RHO = 0.46      # FW's fixed-ρ benchmark AR(1) coefficient
 MAX_LAGS = 4          # cap on BIC lag search for the AR-GAP order
 
 
-_EXPINF10_CACHE: dict[str, pd.Series | None] = {}
+_ANCHOR_CACHE: dict[str, pd.Series | None] = {}
 
 
 def _expinf10() -> pd.Series | None:
-    """Fetch Cleveland Fed 10-yr expected inflation, cached across calls.
-
-    Returns None if no FRED key or the series can't be fetched — callers should
-    then fall back to exp-smoothing.
-    """
-    if "s" in _EXPINF10_CACHE:
-        return _EXPINF10_CACHE["s"]
+    """Fetch Cleveland Fed 10-yr expected inflation, cached across calls."""
+    if "expinf10" in _ANCHOR_CACHE:
+        return _ANCHOR_CACHE["expinf10"]
     try:
         from ..data import fred as _f
         s = _f._fetch_fred_series("EXPINF10YR", "1960-01-01")
     except Exception:
         s = None
-    _EXPINF10_CACHE["s"] = s
+    _ANCHOR_CACHE["expinf10"] = s
+    return s
+
+
+def _spf_cpi10() -> pd.Series | None:
+    """SPF 10-year-ahead CPI forecast (Philly Fed), cached across calls.
+
+    Primary Blue-Chip replacement for τ_t — same object (long-horizon
+    professional-consensus inflation forecast), quarterly, 1991Q4→.
+    """
+    if "spf10" in _ANCHOR_CACHE:
+        return _ANCHOR_CACHE["spf10"]
+    try:
+        from ..data.surveys import load_spf_cpi10
+        s = load_spf_cpi10()
+    except Exception:
+        s = None
+    _ANCHOR_CACHE["spf10"] = s
     return s
 
 
@@ -57,35 +77,41 @@ def _exp_smooth(pi: pd.Series, alpha: float) -> pd.Series:
 
 
 def local_mean_trend(pi: pd.Series, alpha: float = ALPHA_TAU) -> pd.Series:
-    """Local-mean trend τ_t: EXPINF10YR when available, α=0.95 exp-smoothing otherwise.
+    """Local-mean trend τ_t with ordered fallbacks: SPF CPI10 → EXPINF10YR → exp-smoothing.
 
-    Returns a Series aligned to `pi`. The two branches are stitched together at the
-    earliest available EXPINF10YR date — before that we use FW's exp-smoothing seed;
-    from then on, we resample EXPINF10YR to π_t's index and forward-fill.
+    Returns a Series aligned to `pi`. Priority: SPF 10-yr CPI (Blue Chip stand-in)
+    wherever available, Cleveland Fed EXPINF10YR to fill earlier post-1982 gaps,
+    and FW's α=0.95 exp-smoothing seed for the earliest pre-anchor sample.
     """
     pi = pi.astype(float).dropna()
     if len(pi) == 0:
         return pd.Series(dtype=float, name="tau")
 
-    exp10 = _expinf10()
-    if exp10 is None or exp10.empty:
-        return _exp_smooth(pi, alpha)
-
-    # Resample EXPINF10YR to pi's cadence, then reindex + ffill onto pi's dates.
+    # Detect pi's cadence for resampling anchor series.
     freq = (getattr(pi.index, "freqstr", None) or "").upper()
     if not freq and len(pi) > 1:
         median_days = float(np.median(np.diff(pi.index.asi8)) / 86_400e9)
         freq = "Q" if median_days > 45 else "M"
-    exp10_r = exp10.resample("QS" if freq.startswith("Q") else "MS").mean()
-    exp10_on_pi = exp10_r.reindex(pi.index).ffill()
+    rule = "QS" if freq.startswith("Q") else "MS"
 
-    # Exp-smoothing prefix: use it up to (and including) the last date where EXPINF10YR
-    # is still NaN after ffill — those are dates that predate the series entirely.
+    def _align(s: pd.Series | None) -> pd.Series | None:
+        if s is None or s.empty:
+            return None
+        return s.resample(rule).mean().reindex(pi.index).ffill()
+
+    spf10 = _align(_spf_cpi10())
+    exp10 = _align(_expinf10())
     tau_es = _exp_smooth(pi, alpha)
-    tau = exp10_on_pi.copy()
-    missing = tau.isna()
-    if missing.any():
-        tau.loc[missing] = tau_es.loc[missing]
+
+    # Layer in priority order: exp-smoothing base, then EXPINF10YR where available,
+    # then SPF CPI10 (highest priority) where available.
+    tau = tau_es.copy()
+    if exp10 is not None:
+        mask = exp10.notna()
+        tau.loc[mask] = exp10.loc[mask]
+    if spf10 is not None:
+        mask = spf10.notna()
+        tau.loc[mask] = spf10.loc[mask]
     tau.name = "tau"
     return tau
 
