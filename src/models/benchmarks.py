@@ -62,12 +62,22 @@ class AtkesonOhanian(ForecastModel):
         forecast_shape="A flat horizontal line at the trailing 12-month average.",
     )
 
-    def __init__(self, window: int = 12):
+    def __init__(self, window: int | None = None):
+        # None → infer 4 (quarterly) / 12 (monthly) from the series at fit time.
         super().__init__(window=window)
         self.window = window
 
     def _fit(self) -> None:
-        w = min(self.window, len(self._y))
+        w = self.window
+        if w is None:
+            # Prefer the pandas-attached freq; fall back to the median date-diff,
+            # since dropna() upstream can wipe freqstr even on regularly-spaced data.
+            freq = (getattr(self._y.index, "freqstr", None) or "").upper()
+            if not freq and len(self._y) > 1:
+                median_days = float(np.median(np.diff(self._y.index.asi8)) / 86_400e9)
+                freq = "Q" if median_days > 45 else "M"
+            w = 4 if freq.startswith("Q") else 12
+        w = min(w, len(self._y))
         self._mean = float(self._y.iloc[-w:].mean())
 
     def _forecast(self, h: int) -> float:

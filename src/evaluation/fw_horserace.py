@@ -39,13 +39,16 @@ class FWResult:
 
 
 def _fit_and_paths(key, y_train, X_train, horizons) -> list[float]:
-    """Fit `key` on y_train and return the h-step forecast for every h in horizons."""
+    """Fit `key` on y_train and return the h-step forecast for every h in horizons.
+
+    FW's h=0 (nowcast) = each model's forecast of the current quarter given data
+    through the previous quarter, i.e. its 1-step-ahead forecast. Realized target
+    at that index is set by the caller (see run_fw_horserace).
+    """
     try:
         m = registry.make(key)
         m.fit(y_train, X_train)
-        return [float(m.forecast(h if h > 0 else 1)) if h > 0
-                else float(y_train.iloc[-1])  # h=0 = nowcast; use last obs as ref
-                for h in horizons]
+        return [float(m.forecast(max(1, h))) for h in horizons]
     except Exception:
         return [float("nan")] * len(horizons)
 
