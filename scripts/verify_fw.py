@@ -27,9 +27,9 @@ from src.evaluation.fw_horserace import run_fw_horserace
 from src.models import registry
 
 
-# Faust-Wright (2013) Table 2 Panel A (GDP deflator, 1985Q1-2011Q4).
+# Faust-Wright (2013) Table 1.2 (GDP deflator, 1985Q1-2011Q4).
 # rows keyed to dashboard model keys, columns = quarterly horizons.
-FW_TABLE_2A = pd.DataFrame(
+FW_TABLE_1_2 = pd.DataFrame(
     {
         0: [1.06, 1.06, 1.07, 1.19, 0.95, 0.98, 1.03, 1.04, 1.04, 1.07, 0.99,
             1.02, 1.00, 1.02, 1.06, 1.02, 1.00],
@@ -111,7 +111,7 @@ def main(short: bool = False, alfred: bool = False) -> None:
           f"n={len(pi)} obs")
 
     horizons = [0, 1, 4, 8] if short else [0, 1, 2, 3, 4, 8]
-    keys = list(FW_TABLE_2A.index)
+    keys = list(FW_TABLE_1_2.index)
     if short:
         # SW07 & DSGE-GAP are ~2s/fit; skip them in short mode
         keys = [k for k in keys if k not in ("sw07", "fw_dsgegap")]
@@ -142,9 +142,9 @@ def main(short: bool = False, alfred: bool = False) -> None:
     )
 
     ours = res.rel_rmspe.reindex(keys)
-    theirs = FW_TABLE_2A.loc[keys, horizons]
+    theirs = FW_TABLE_1_2.loc[keys, horizons]
 
-    print("\n=== Faust-Wright Table 2A (GDP deflator, 1985Q1-2011Q4) ===")
+    print("\n=== Faust-Wright Table 1.2 (GDP deflator, 1985Q1-2011Q4) ===")
     print("model            " + "".join(f"{'h=' + str(h):>8s}" for h in horizons))
     print("-" * (17 + 8 * len(horizons)))
     for k in keys:
