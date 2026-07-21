@@ -182,8 +182,9 @@ class PhillipsFW(ForecastModel):
             warnings.simplefilter("ignore")
             res = sm.OLS(df["y"].values,
                          sm.add_constant(df.drop(columns="y").values)).fit()
+        # training encodes u_{t-1}; at origin T the corresponding value is u_{T-1}.
         row = ([1.0] + [float(pi.iloc[-1 - l]) for l in range(p)]
-               + [float(u.iloc[-1])])
+               + [float(u.iloc[-2])])
         return float(res.predict(np.array(row).reshape(1, -1))[0])
 
 
@@ -311,8 +312,9 @@ class PCGap(ForecastModel):
             warnings.simplefilter("ignore")
             res = sm.OLS(df["y"].values,
                          sm.add_constant(df.drop(columns="y").values)).fit()
+        # training encodes u_{t-1}; at origin T the corresponding value is u_{T-1}.
         row = ([1.0] + [float(gap.iloc[-1 - l]) for l in range(p)]
-               + [float(u.iloc[-1])])
+               + [float(u.iloc[-2])])
         gap_h = float(res.predict(np.array(row).reshape(1, -1))[0])
         return float(self._tau.iloc[-1]) + gap_h
 
@@ -372,8 +374,9 @@ class PCTVNGap(ForecastModel):
             warnings.simplefilter("ignore")
             res = sm.OLS(df["y"].values,
                          sm.add_constant(df.drop(columns="y").values)).fit()
+        # training encodes slack_{t-1}; at origin T the corresponding value is slack_{T-1}.
         row = ([1.0] + [float(gap.iloc[-1 - l]) for l in range(p)]
-               + [float(slack.iloc[-1])])
+               + [float(slack.iloc[-2])])
         gap_h = float(res.predict(np.array(row).reshape(1, -1))[0])
         return float(self._tau.iloc[-1]) + gap_h
 
@@ -751,13 +754,13 @@ class FAVARLargeDS(_LargeDSBase):
         reference="Faust–Wright (2013) — FAVAR",
         description=(
             "FW model #14. Extract the first m principal components z_1..z_m from the "
-            "standardized large panel, then fit a VAR(p) in ξ_t = (g_t, z_{1,t}, ..., z_{m,t}) "
+            "standardized large panel, then fit a VAR(1) in ξ_t = (g_t, z_{1,t}, ..., z_{m,t}) "
             "and iterate forward. Bernanke, Boivin & Eliasz (2005) factor-augmented VAR."
         ),
     )
 
-    def __init__(self, n_factors: int = 3, max_p: int = MAX_LAGS):
-        super().__init__(max_p=max_p)
+    def __init__(self, n_factors: int = 3):
+        super().__init__()
         self.n_factors = n_factors
 
     def _fit(self) -> None:

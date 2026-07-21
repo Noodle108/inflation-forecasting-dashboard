@@ -41,14 +41,14 @@ class FWResult:
 def _fit_and_paths(key, y_train, X_train, horizons) -> list[float]:
     """Fit `key` on y_train and return the h-step forecast for every h in horizons.
 
-    FW's h=0 (nowcast) = each model's forecast of the current quarter given data
-    through the previous quarter, i.e. its 1-step-ahead forecast. Realized target
-    at that index is set by the caller (see run_fw_horserace).
+    FW's convention (Table 1.2): with data through quarter t-1, column h is the
+    forecast for π_{t+h}, i.e. (h+1)-steps-ahead of the last training obs. h=0
+    is the nowcast of π_t. Realized target at index t+h is set by the caller.
     """
     try:
         m = registry.make(key)
         m.fit(y_train, X_train)
-        return [float(m.forecast(max(1, h))) for h in horizons]
+        return [float(m.forecast(h + 1)) for h in horizons]
     except Exception:
         return [float("nan")] * len(horizons)
 
@@ -77,9 +77,10 @@ def run_fw_horserace(
 ) -> FWResult:
     """Score `model_keys` at every h in `horizons` on inflation series `y`.
 
-    Each model fits once per origin. For h=0 (nowcast) we use `y_train.iloc[-1]`
-    as a naive nowcast reference. Non-zero horizons use forecast(h). Origins
-    iterate from `min_train` to `len(y) - max(horizons) - 1`.
+    Each model fits once per origin. Column h is FW's h-quarter-ahead forecast:
+    with training data through index t-1, the forecast targets y.iloc[t+h]
+    (h=0 → nowcast of π_t, h=k → π_{t+k}). Origins iterate from `min_train`
+    to `len(y) - max(horizons) - 1`.
 
     Real-time / vintage mode: pass ``training_by_origin`` = a dict keyed by
     origin timestamp with values ``(y_train, X_train)``. When set, models fit
@@ -95,6 +96,8 @@ def run_fw_horserace(
     n_obs = len(y)
     h_max = max(horizons)
 
+    # y_train ends at index t-1; target for column h is y.iloc[t+h] (FW convention).
+    # Largest origin t satisfies t + h_max <= n_obs - 1.
     origins = list(range(min_train, n_obs - h_max, step))
     forecasts = {(k, h): [None] * len(origins) for k in model_keys for h in horizons}
     realized = {h: [] for h in horizons}
@@ -107,7 +110,7 @@ def run_fw_horserace(
     tasks = []
     for i, t in enumerate(origins):
         for h in horizons:
-            idx = t if h == 0 else t + h - 1
+            idx = t + h
             realized[h].append(float(y.iloc[idx]) if idx < n_obs else float("nan"))
         origin_ts = y.index[t]
         origin_dates.append(origin_ts)
