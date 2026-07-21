@@ -1053,23 +1053,49 @@ observed *h* quarters later. Repeat across many origins, take the RMSPE.
     # ================================================================= #
     st.markdown("### 1. Configure the run")
 
-    # Presets keep 90% of users out of the multiselect entirely.
+    # Paper-replication presets lock every knob FW hard-coded in Table 1.2 / 1.3:
+    # models = all 17 rows, horizons = [0,1,2,3,4,8], recursive step=1, first
+    # origin = 1985Q1 (so min_train is computed from the data length), sample
+    # window ends 2011Q4. Interactive presets keep flexibility for exploration.
+    FW_1_2_KEYS = list(FW_TABLE_KEYS)  # every model in Table 1.2/1.3, incl. surveys
+    _paper_horizons = [0, 1, 2, 3, 4, 8] if freq == "Q" else [0, 1, 3, 6, 12, 24]
     PRESETS = {
+        "📄 FW Table 1.2 replication (GDPDEF)": {
+            "keys": FW_1_2_KEYS,
+            "horizons": _paper_horizons,
+            "step": 1,
+            "measure": "gdpdef",
+            "sample_end": pd.Timestamp("2011-12-31"),
+            "first_origin": pd.Timestamp("1985-01-01"),
+            "locked": True,
+        },
+        "📄 FW Table 1.3 replication (CPI)": {
+            "keys": FW_1_2_KEYS,
+            "horizons": _paper_horizons,
+            "step": 1,
+            "measure": "cpi",
+            "sample_end": pd.Timestamp("2011-12-31"),
+            "first_origin": pd.Timestamp("1985-01-01"),
+            "locked": True,
+        },
         "Quick (fast, ~10-20s)": {
             "keys": [k for k in fw_all_keys
                      if k not in ("sw07", "fw_dsgegap", "tvpvar", "fw_ewa", "fw_bma")],
             "horizons": [0, 1, 4, 8] if freq == "Q" else [0, 1, 6, 12],
             "step": 4,
+            "locked": False,
         },
         "Standard (recommended)": {
             "keys": [k for k in fw_all_keys if k not in ("sw07", "fw_dsgegap", "tvpvar")],
             "horizons": [0, 1, 2, 3, 4, 8] if freq == "Q" else [0, 1, 3, 6, 12, 24],
             "step": 2,
+            "locked": False,
         },
-        "Full FW replication (slow)": {
+        "Full model set (slow)": {
             "keys": list(fw_all_keys),
             "horizons": [0, 1, 2, 3, 4, 8] if freq == "Q" else [0, 1, 3, 6, 12, 24],
             "step": 1,
+            "locked": False,
         },
     }
 
@@ -1077,66 +1103,138 @@ observed *h* quarters later. Repeat across many origins, take the RMSPE.
     with pcol:
         preset = st.radio(
             "Preset", list(PRESETS.keys()),
-            index=1, key="fw_preset",
-            help="A curated bundle of horizons, models, and origin step.",
+            index=2, key="fw_preset",  # default: Quick (index 2 after the two paper presets)
+            help=(
+                "Paper-replication presets (📄) lock every knob to match Faust-Wright's "
+                "Table 1.2 / 1.3: same models, horizons, recursive step=1, first "
+                "origin 1985Q1, sample ends 2011Q4. Requires quarterly frequency."
+            ),
         )
+    _preset_spec = PRESETS[preset]
+    _is_paper = _preset_spec.get("locked", False)
+
+    # For paper presets the measure is locked; otherwise the user picks freely.
     with mcol:
-        fw_infl = st.selectbox(
-            "Inflation measure",
-            options=list(data.inflation.columns),
-            format_func=lambda k: labels.get(k, k),
-            key="fw_infl",
+        if _is_paper:
+            _paper_measure = _preset_spec["measure"]
+            if _paper_measure in data.inflation.columns:
+                fw_infl = _paper_measure
+                st.selectbox(
+                    "Inflation measure (locked by preset)",
+                    options=[fw_infl],
+                    format_func=lambda k: labels.get(k, k),
+                    key="fw_infl_locked",
+                    disabled=True,
+                )
+            else:
+                fw_infl = None
+                st.error(
+                    f"This preset requires **{_paper_measure.upper()}**, which isn't "
+                    f"available at freq='{freq}'. Switch to quarterly frequency in "
+                    f"the sidebar."
+                )
+        else:
+            fw_infl = st.selectbox(
+                "Inflation measure",
+                options=list(data.inflation.columns),
+                format_func=lambda k: labels.get(k, k),
+                key="fw_infl",
+            )
+        y_fw = data.series(fw_infl) if fw_infl is not None else pd.Series(dtype=float)
+
+    # Warn if the user is on a paper preset with the wrong frequency.
+    if _is_paper and freq != "Q":
+        st.warning(
+            "📄 **Paper-replication presets require quarterly frequency.** "
+            "Faust-Wright's horse race is quarterly throughout — switch the "
+            "sidebar frequency to **Q** to run it."
         )
-        y_fw = data.series(fw_infl)
 
-    _p = PRESETS[preset]
-    with st.expander("Fine-tune (models, horizons, training window, workers)",
-                     expanded=False):
-        # ---- Models grouped by family ----
-        st.markdown("**Models to include**")
-        by_family = {"Benchmark": [], "Statistical": [], "Structural": []}
-        for k in fw_all_keys:
-            by_family.setdefault(infos[k].family, []).append(k)
-        selected = set(_p["keys"])
-        fam_cols = st.columns(len(by_family))
-        for col, fam in zip(fam_cols, ["Benchmark", "Statistical", "Structural"]):
-            with col:
-                st.caption(f"**{fam}** ({len(by_family.get(fam, []))})")
-                for k in by_family.get(fam, []):
-                    default = k in selected
-                    if st.checkbox(infos[k].name, value=default, key=f"fw_pick_{k}"):
-                        selected.add(k)
-                    else:
-                        selected.discard(k)
-        fw_selected = [k for k in fw_all_keys if k in selected]
+    # Paper preset: clip the sample end so the RMSPE window matches FW.
+    if _is_paper and fw_infl is not None and not y_fw.empty:
+        _end = _preset_spec["sample_end"]
+        y_fw = y_fw.loc[:_end]
 
-        st.divider()
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            fw_horizons = st.multiselect(
-                "Horizons (periods)",
-                options=list(range(0, 25)),
-                default=_p["horizons"], key="fw_horizons",
+    # Paper preset: compute min_train so the first origin lands on 1985Q1.
+    _paper_min_train = None
+    if _is_paper and not y_fw.empty:
+        _paper_min_train = int((y_fw.index < _preset_spec["first_origin"]).sum())
+
+    _p = _preset_spec
+    if _is_paper:
+        # Every knob is locked to the paper's choices; the expander only shows
+        # workers (a machine-local cost knob that doesn't affect the numbers).
+        fw_selected = [k for k in _p["keys"] if k in fw_all_keys]
+        fw_horizons = list(_p["horizons"])
+        fw_step = _p["step"]
+        _default_min_train = max(40, min(_paper_min_train or 100, max(40, len(y_fw) - 30)))
+        fw_min_train = _default_min_train
+        with st.expander("Paper-preset settings (locked) & workers", expanded=False):
+            st.caption(
+                f"**Locked to Faust-Wright's Table.** "
+                f"Models: {len(fw_selected)} (every FW row present in registry).  "
+                f"Horizons: {fw_horizons}.  "
+                f"Step: {fw_step} (recursive, every quarter).  "
+                f"First origin: {_p['first_origin'].date()}.  "
+                f"Sample end: {_p['sample_end'].date()}.  "
+                f"min_train: {fw_min_train}."
             )
-        with c2:
-            fw_min_train = st.slider(
-                "Min training window", 40,
-                int(min(400, max(80, len(y_fw) - 30))),
-                value=min(80, len(y_fw) - 30), step=4, key="fw_min_train",
-            )
-        with c3:
-            fw_step = st.selectbox("Origin step", [1, 2, 4, 6, 12],
-                                   index=[1, 2, 4, 6, 12].index(_p["step"]),
-                                   key="fw_step")
-        with c4:
             _cpu = max(1, (os.cpu_count() or 2))
             _worker_options = sorted(set([1, 2, 4, min(8, _cpu)]))
             fw_workers = st.selectbox(
                 "Parallel workers", _worker_options,
                 index=min(len(_worker_options) - 1, 2),
                 key="fw_workers",
-                help=f"Detected {_cpu} CPUs. More workers = faster.",
+                help=f"Detected {_cpu} CPUs. More workers = faster, but no effect on results.",
             )
+    else:
+        with st.expander("Fine-tune (models, horizons, training window, workers)",
+                         expanded=False):
+            # ---- Models grouped by family ----
+            st.markdown("**Models to include**")
+            by_family = {"Benchmark": [], "Statistical": [], "Structural": []}
+            for k in fw_all_keys:
+                by_family.setdefault(infos[k].family, []).append(k)
+            selected = set(_p["keys"])
+            fam_cols = st.columns(len(by_family))
+            for col, fam in zip(fam_cols, ["Benchmark", "Statistical", "Structural"]):
+                with col:
+                    st.caption(f"**{fam}** ({len(by_family.get(fam, []))})")
+                    for k in by_family.get(fam, []):
+                        default = k in selected
+                        if st.checkbox(infos[k].name, value=default, key=f"fw_pick_{k}"):
+                            selected.add(k)
+                        else:
+                            selected.discard(k)
+            fw_selected = [k for k in fw_all_keys if k in selected]
+
+            st.divider()
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                fw_horizons = st.multiselect(
+                    "Horizons (periods)",
+                    options=list(range(0, 25)),
+                    default=_p["horizons"], key="fw_horizons",
+                )
+            with c2:
+                fw_min_train = st.slider(
+                    "Min training window", 40,
+                    int(min(400, max(80, len(y_fw) - 30))),
+                    value=min(80, len(y_fw) - 30), step=4, key="fw_min_train",
+                )
+            with c3:
+                fw_step = st.selectbox("Origin step", [1, 2, 4, 6, 12],
+                                       index=[1, 2, 4, 6, 12].index(_p["step"]),
+                                       key="fw_step")
+            with c4:
+                _cpu = max(1, (os.cpu_count() or 2))
+                _worker_options = sorted(set([1, 2, 4, min(8, _cpu)]))
+                fw_workers = st.selectbox(
+                    "Parallel workers", _worker_options,
+                    index=min(len(_worker_options) - 1, 2),
+                    key="fw_workers",
+                    help=f"Detected {_cpu} CPUs. More workers = faster.",
+                )
 
     n_origins_est = max(0, (len(y_fw) - fw_min_train - max(fw_horizons or [1])) // fw_step + 1)
     n_fits = n_origins_est * len(fw_selected)
@@ -1156,7 +1254,17 @@ observed *h* quarters later. Repeat across many origins, take the RMSPE.
     st.markdown("### 2. Results")
 
     if run_fw:
-        if not fw_selected or not fw_horizons:
+        if _is_paper and freq != "Q":
+            st.error(
+                "Paper-replication presets need quarterly frequency. "
+                "Switch the sidebar frequency to **Q** and try again."
+            )
+        elif _is_paper and (fw_infl is None or y_fw.empty):
+            st.error(
+                f"Paper preset needs the **{_preset_spec.get('measure','?').upper()}** "
+                f"inflation series and it isn't available in this dataset."
+            )
+        elif not fw_selected or not fw_horizons:
             st.error("Pick at least one model and one horizon.")
         else:
             keys = (fw_selected if FW_BENCHMARK_KEY in fw_selected
@@ -1173,6 +1281,8 @@ observed *h* quarters later. Repeat across many origins, take the RMSPE.
             bar.empty()
             st.session_state["fw_last_result"] = res
             st.session_state["fw_last_keys"] = keys
+            st.session_state["fw_last_paper"] = _is_paper
+            st.session_state["fw_last_preset"] = preset
 
     res = st.session_state.get("fw_last_result")
     keys = st.session_state.get("fw_last_keys") or []

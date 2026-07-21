@@ -51,12 +51,17 @@ FW_TABLE_1_2 = pd.DataFrame(
 
 
 def load_gdpdef_quarterly() -> tuple[pd.Series, pd.DataFrame | None]:
-    """GDP deflator quarterly, annualized log-diff. Plus unemployment (quarterly)."""
+    """GDP deflator quarterly, annualized log-diff. Plus unemployment (quarterly).
+
+    Names the Series ``gdpdef`` so the FW τ-builder auto-detects the measure
+    and picks the Blue Chip LR GDPDEF anchor (falling back to exp-smoothing).
+    """
     lvl = fred_mod._fetch_fred_series("GDPDEF", "1960-01-01")
     if lvl is None:
         raise SystemExit("Need a FRED key with GDPDEF access.")
     lvl_q = lvl.resample("QS").mean()
     pi = 400.0 * np.log(lvl_q / lvl_q.shift(1)).dropna()
+    pi.name = "gdpdef"
     unrate = fred_mod._fetch_fred_series("UNRATE", "1960-01-01")
     if unrate is None:
         return pi, None
@@ -65,10 +70,12 @@ def load_gdpdef_quarterly() -> tuple[pd.Series, pd.DataFrame | None]:
     return pi, X
 
 
-def _pi_from_level(lvl: pd.Series) -> pd.Series:
+def _pi_from_level(lvl: pd.Series, name: str = "gdpdef") -> pd.Series:
     """Quarterly annualized log-diff inflation from a monthly-or-quarterly level."""
     lvl_q = lvl.resample("QS").mean()
-    return 400.0 * np.log(lvl_q / lvl_q.shift(1)).dropna()
+    pi = 400.0 * np.log(lvl_q / lvl_q.shift(1)).dropna()
+    pi.name = name
+    return pi
 
 
 def build_vintage_training(origins: pd.DatetimeIndex) -> dict:

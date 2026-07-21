@@ -83,6 +83,15 @@ def _gb_path() -> Optional[Path]:
     return None
 
 
+def _bc_lr_path() -> Optional[Path]:
+    for name in ("blue_chip_lr.xlsx", "bcei_lr.xlsx",
+                 "blue_chip_lr.xls",  "bcei_lr.xls"):
+        p = SURVEYS_DIR / name
+        if p.exists():
+            return p
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # SPF loader
 # --------------------------------------------------------------------------- #
@@ -217,6 +226,97 @@ def load_greenbook(series: str = "cpi") -> Optional[pd.DataFrame]:
 
 
 # --------------------------------------------------------------------------- #
+# Blue Chip long-range (5-10y) — τ anchor used by Faust-Wright's Table 1.2
+# --------------------------------------------------------------------------- #
+# Expected file:  data/surveys/blue_chip_lr.xlsx
+# Expected shape (one sheet per measure, sheet names case-insensitive):
+#   sheet "GDPDEF" (or "PGDP"): columns YEAR, QUARTER, VALUE   (percent, annualized)
+#   sheet "CPI":                columns YEAR, QUARTER, VALUE
+#   sheet "PCE":                columns YEAR, QUARTER, VALUE
+# Any subset of measures may be present. Values are annualized percent.
+#
+# Falls back gracefully: if a measure's sheet is missing, load_blue_chip_lr
+# returns None for that measure and the τ-builder layers in the next-best
+# anchor (SPF CPI10, EXPINF10YR, or exp-smoothing).
+_BC_LR_SHEET_ALIASES = {
+    "gdpdef": ("gdpdef", "pgdp", "gdp_deflator", "deflator"),
+    "cpi":    ("cpi", "cpi_headline", "headline_cpi"),
+    "pce":    ("pce", "pce_headline", "headline_pce"),
+}
+
+
+@lru_cache(maxsize=8)
+def load_blue_chip_lr(measure: str = "gdpdef") -> Optional[pd.Series]:
+    """Blue Chip Economic Indicators 5-10y long-range inflation forecast.
+
+    Returns a quarterly Series indexed by survey origin (quarter start), values
+    in annualized percent. This is FW's actual τ anchor for Table 1.2 (Blue
+    Chip GDPDEF LR); the SPF CPI10 / EXPINF10YR paths in local_mean_trend are
+    open-source stand-ins used only when this file is absent.
+
+    ``measure`` in {"gdpdef", "cpi", "pce"} — case-insensitive.
+    """
+    path = _bc_lr_path()
+    if path is None:
+        return None
+    aliases = _BC_LR_SHEET_ALIASES.get(measure.lower())
+    if not aliases:
+        return None
+    try:
+        xf = _open_xlsx_forgiving(path)
+    except Exception:
+        return None
+    sheet_map = {s.lower(): s for s in xf.sheet_names}
+    sheet = next((sheet_map[a] for a in aliases if a in sheet_map), None)
+    if sheet is None:
+        return None
+    try:
+        df = xf.parse(sheet)
+    except Exception:
+        return None
+    cols = {c.lower(): c for c in df.columns}
+    # Accept either (YEAR, QUARTER, VALUE) or (DATE, VALUE) layout.
+    if {"year", "quarter"}.issubset(cols):
+        val_col = next((cols[k] for k in ("value", "bc_lr", "bcei_lr", "lr")
+                        if k in cols), None)
+        if val_col is None:
+            # single non-index numeric column
+            num_cols = [c for c in df.columns
+                        if c not in (cols["year"], cols["quarter"])
+                        and pd.api.types.is_numeric_dtype(df[c])]
+            if len(num_cols) != 1:
+                return None
+            val_col = num_cols[0]
+        df = df.dropna(subset=[cols["year"], cols["quarter"], val_col])
+        origin = pd.PeriodIndex.from_fields(
+            year=df[cols["year"]].astype(int),
+            quarter=df[cols["quarter"]].astype(int),
+            freq="Q",
+        ).to_timestamp(how="start")
+        vals = pd.to_numeric(df[val_col], errors="coerce").values
+    elif "date" in cols:
+        val_col = next((cols[k] for k in ("value", "bc_lr", "bcei_lr", "lr")
+                        if k in cols), None)
+        if val_col is None:
+            num_cols = [c for c in df.columns
+                        if c != cols["date"]
+                        and pd.api.types.is_numeric_dtype(df[c])]
+            if len(num_cols) != 1:
+                return None
+            val_col = num_cols[0]
+        df = df.dropna(subset=[cols["date"], val_col])
+        origin = pd.to_datetime(df[cols["date"]], errors="coerce")
+        vals = pd.to_numeric(df[val_col], errors="coerce").values
+    else:
+        return None
+    s = pd.Series(vals, index=origin, name=f"bc_lr_{measure}").sort_index().dropna()
+    # Snap origins to quarter start for clean alignment downstream.
+    s.index = s.index.to_period("Q").to_timestamp(how="start")
+    s = s[~s.index.duplicated(keep="last")]
+    return s
+
+
+# --------------------------------------------------------------------------- #
 # Blue Chip surrogate
 # --------------------------------------------------------------------------- #
 def load_blue_chip_surrogate() -> Optional[pd.Series]:
@@ -242,12 +342,20 @@ class SurveyStatus:
     gb_present: bool
     gb_path: Optional[Path]
     bc_available: bool
+    bc_lr_present: bool
+    bc_lr_path: Optional[Path]
+    bc_lr_measures: tuple[str, ...]
 
     def summary(self) -> str:
         parts = []
         parts.append(f"**SPF**: {'✅ ' + self.spf_path.name if self.spf_present else '❌ (place at data/surveys/spf_mean_level.xlsx)'}")
         parts.append(f"**Greenbook**: {'✅ ' + self.gb_path.name if self.gb_present else '❌ (place at data/surveys/greenbook_row_format.xlsx)'}")
         parts.append(f"**Blue-Chip surrogate** (MICH + EXPINF1YR): {'✅' if self.bc_available else '❌'}")
+        if self.bc_lr_present:
+            meas = ", ".join(self.bc_lr_measures) if self.bc_lr_measures else "none"
+            parts.append(f"**Blue-Chip 5–10y** (τ anchor): ✅ {self.bc_lr_path.name}  ({meas})")
+        else:
+            parts.append("**Blue-Chip 5–10y** (τ anchor): ❌ (place at data/surveys/blue_chip_lr.xlsx)")
         return "  |  ".join(parts)
 
 
@@ -255,8 +363,13 @@ def survey_status() -> SurveyStatus:
     spf = _spf_path()
     gb = _gb_path()
     bc = load_blue_chip_surrogate()
+    bc_lr = _bc_lr_path()
+    measures = tuple(m for m in ("gdpdef", "cpi", "pce")
+                     if load_blue_chip_lr(m) is not None) if bc_lr else ()
     return SurveyStatus(
         spf_present=spf is not None, spf_path=spf,
         gb_present=gb is not None, gb_path=gb,
         bc_available=bc is not None,
+        bc_lr_present=bc_lr is not None, bc_lr_path=bc_lr,
+        bc_lr_measures=measures,
     )

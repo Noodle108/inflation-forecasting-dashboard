@@ -58,6 +58,8 @@ PRICE_SERIES = {
     "core_cpi": PriceSeries("core_cpi", "CPILFESL", "Core CPI (ex food & energy)", "M"),
     "pce": PriceSeries("pce", "PCEPI", "PCE (headline)", "M"),
     "core_pce": PriceSeries("core_pce", "PCEPILFE", "Core PCE (ex food & energy)", "M"),
+    # GDPDEF is quarterly-only on FRED; used by the Faust-Wright Table 1.2 replication.
+    "gdpdef": PriceSeries("gdpdef", "GDPDEF", "GDP deflator", "Q"),
 }
 
 # Activity / slack variables used by the Phillips curve and (later) BVAR/DSGE.
@@ -244,6 +246,9 @@ def load_data(freq: str = "M", start: str = DEFAULT_START) -> MacroData:
 
     infl = {}
     for key, ps in PRICE_SERIES.items():
+        # Quarterly-native series (e.g. GDPDEF) only make sense at freq="Q".
+        if ps.freq == "Q" and freq != "Q":
+            continue
         level = _fetch_fred_series(ps.fred_id, start)  # monthly price level
         if level is None or len(level) <= 24:
             continue

@@ -5,19 +5,24 @@ forecast is written in "gap" form (g_t = π_t − τ_t). Their preferred τ_t is
 recent Blue-Chip 5–10y long-run inflation forecast (available from 1979); pre-1979
 they fall back to exponential smoothing (α = 0.95) of realized inflation (footnote 8).
 
-Blue-Chip is subscription-only. We build τ_t from three ordered fallbacks:
+We build τ_t from four ordered fallbacks (highest priority first, measure-aware):
 
-    1. **SPF 10-year CPI** (Philly Fed sheet ``CPI10``, 1991Q4→). Same object as
-       Blue Chip — a quarterly consensus of professional forecasters at a 5–10y
-       long horizon — just published by the Philly Fed rather than Wolters Kluwer.
-       This is the standard academic replacement when Blue Chip isn't available.
-    2. **Cleveland Fed 10-yr expected inflation** (FRED ``EXPINF10YR``, 1982→).
-       Model-based (Haubrich–Pennacchi–Ritchken 2012) — used when SPF is missing.
-    3. **FW's exponential-smoothing fallback** (footnote 8):
+    1. **Blue Chip 5–10y** for the *matching measure* (Table 1.2 uses GDPDEF;
+       Table 1.3 uses CPI). Read from data/surveys/blue_chip_lr.xlsx if present.
+       This is the paper-exact anchor when the file is available.
+    2. **SPF 10-year CPI** (Philly Fed sheet ``CPI10``, 1991Q4→). Open-source
+       Blue-Chip stand-in — quarterly professional consensus at a 5–10y horizon.
+       Used only when the measure is CPI (mixing CPI anchors into GDPDEF/PCE
+       forecasts introduces a persistent 30–50 bp wedge, so we don't).
+    3. **Cleveland Fed 10-yr expected inflation** (FRED ``EXPINF10YR``, 1982→).
+       Model-based (Haubrich–Pennacchi–Ritchken 2012), also CPI-flavored — used
+       to bridge SPF's 1991Q4 start when the measure is CPI.
+    4. **FW's exponential-smoothing fallback** (footnote 8):
            τ_t = α τ_{t-1} + (1 − α) π_t,     α = 0.95
-       Used for dates before both survey/model anchors are available.
+       Universal fallback — used before survey anchors exist, and used for
+       GDPDEF/PCE whenever Blue Chip LR is not available.
 
-All three anchors are annualized percent — same units as π_t, no scaling needed.
+All anchors are annualized percent — same units as π_t, no scaling needed.
 
 Also collected here: BIC lag selection for AR-GAP, and a tiny direct h-step OLS helper
 that most FW models share.
@@ -34,6 +39,19 @@ MAX_LAGS = 4          # cap on BIC lag search for the AR-GAP order
 
 
 _ANCHOR_CACHE: dict[str, pd.Series | None] = {}
+
+# Which π-series names route to which Blue-Chip LR measure. Missing keys fall
+# through to no BC-LR anchor (e.g. "core_cpi", "core_pce" — the paper's Table 1.2
+# / 1.3 don't cover core aggregates).
+_BC_MEASURE_FOR = {
+    "cpi":    "cpi",
+    "pce":    "pce",
+    "gdpdef": "gdpdef",
+    "pgdp":   "gdpdef",
+}
+# Series names for which CPI-flavored open-source anchors (SPF CPI10, EXPINF10YR)
+# are a reasonable stand-in when Blue Chip LR is missing.
+_CPI_FLAVORED = {"cpi", "core_cpi"}
 
 
 def _expinf10() -> pd.Series | None:
@@ -52,8 +70,9 @@ def _expinf10() -> pd.Series | None:
 def _spf_cpi10() -> pd.Series | None:
     """SPF 10-year-ahead CPI forecast (Philly Fed), cached across calls.
 
-    Primary Blue-Chip replacement for τ_t — same object (long-horizon
-    professional-consensus inflation forecast), quarterly, 1991Q4→.
+    Open-source Blue-Chip replacement for τ_t when the inflation measure being
+    forecast is CPI-flavored — same object (long-horizon professional-consensus
+    inflation forecast), quarterly, 1991Q4→.
     """
     if "spf10" in _ANCHOR_CACHE:
         return _ANCHOR_CACHE["spf10"]
@@ -63,6 +82,20 @@ def _spf_cpi10() -> pd.Series | None:
     except Exception:
         s = None
     _ANCHOR_CACHE["spf10"] = s
+    return s
+
+
+def _bc_lr(measure: str) -> pd.Series | None:
+    """Blue Chip 5-10y long-range forecast for a specific measure, cached."""
+    ck = f"bc_lr_{measure}"
+    if ck in _ANCHOR_CACHE:
+        return _ANCHOR_CACHE[ck]
+    try:
+        from ..data.surveys import load_blue_chip_lr
+        s = load_blue_chip_lr(measure)
+    except Exception:
+        s = None
+    _ANCHOR_CACHE[ck] = s
     return s
 
 
@@ -76,16 +109,28 @@ def _exp_smooth(pi: pd.Series, alpha: float) -> pd.Series:
     return pd.Series(out, index=pi.index, name="tau")
 
 
-def local_mean_trend(pi: pd.Series, alpha: float = ALPHA_TAU) -> pd.Series:
-    """Local-mean trend τ_t with ordered fallbacks: SPF CPI10 → EXPINF10YR → exp-smoothing.
+def local_mean_trend(pi: pd.Series, alpha: float = ALPHA_TAU,
+                     measure: str | None = None) -> pd.Series:
+    """Measure-aware local-mean trend τ_t.
 
-    Returns a Series aligned to `pi`. Priority: SPF 10-yr CPI (Blue Chip stand-in)
-    wherever available, Cleveland Fed EXPINF10YR to fill earlier post-1982 gaps,
-    and FW's α=0.95 exp-smoothing seed for the earliest pre-anchor sample.
+    Priority (highest first):
+      1. Blue Chip 5-10y for the matching measure (paper-exact, if the file
+         data/surveys/blue_chip_lr.xlsx is present).
+      2. SPF CPI10, then EXPINF10YR — only when the measure is CPI-flavored.
+         Mixing CPI anchors into GDPDEF/PCE gap forecasts biases the trend by
+         30-50 bp, so we don't.
+      3. FW's α=0.95 exp-smoothing fallback (footnote 8). Universal.
+
+    ``measure`` is auto-detected from ``pi.name`` when omitted; pass explicitly
+    when the Series has no name (e.g. from verify_fw.py).
     """
     pi = pi.astype(float).dropna()
     if len(pi) == 0:
         return pd.Series(dtype=float, name="tau")
+
+    if measure is None:
+        name = (getattr(pi, "name", "") or "").lower()
+        measure = name if name else None
 
     # Detect pi's cadence for resampling anchor series.
     freq = (getattr(pi.index, "freqstr", None) or "").upper()
@@ -99,19 +144,22 @@ def local_mean_trend(pi: pd.Series, alpha: float = ALPHA_TAU) -> pd.Series:
             return None
         return s.resample(rule).mean().reindex(pi.index).ffill()
 
-    spf10 = _align(_spf_cpi10())
-    exp10 = _align(_expinf10())
-    tau_es = _exp_smooth(pi, alpha)
+    # Apply anchors from LOWEST to HIGHEST priority so each layer overwrites
+    # the previous where it has coverage.
+    tau = _exp_smooth(pi, alpha)                       # universal base (footnote 8)
 
-    # Layer in priority order: exp-smoothing base, then EXPINF10YR where available,
-    # then SPF CPI10 (highest priority) where available.
-    tau = tau_es.copy()
-    if exp10 is not None:
-        mask = exp10.notna()
-        tau.loc[mask] = exp10.loc[mask]
-    if spf10 is not None:
-        mask = spf10.notna()
-        tau.loc[mask] = spf10.loc[mask]
+    if (measure or "") in _CPI_FLAVORED:               # CPI-only open-source anchors
+        for anchor in (_expinf10(), _spf_cpi10()):     # EXPINF10YR, then SPF CPI10
+            aligned = _align(anchor)
+            if aligned is not None:
+                tau.loc[aligned.notna()] = aligned[aligned.notna()]
+
+    bc_measure = _BC_MEASURE_FOR.get(measure or "")    # highest priority: BC-LR
+    if bc_measure is not None:
+        bc = _align(_bc_lr(bc_measure))
+        if bc is not None:
+            tau.loc[bc.notna()] = bc[bc.notna()]
+
     tau.name = "tau"
     return tau
 
